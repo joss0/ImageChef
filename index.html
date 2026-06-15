@@ -1,0 +1,1576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ImageChef</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --panel: #16213e;
+    --surface: #0f3460;
+    --surface2: #1a1a3e;
+    --accent: #e94560;
+    --accent2: #0f9b8e;
+    --text: #e0e0e0;
+    --text-dim: #8888aa;
+    --border: #2a2a5a;
+    --success: #4caf50;
+    --warning: #ff9800;
+    --error: #f44336;
+    --radius: 6px;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 2px solid var(--accent);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  header span.tagline {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+  }
+  .main-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  /* ── Left Panel ── */
+  .left-panel {
+    width: 320px;
+    min-width: 260px;
+    max-width: 380px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 10px 16px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .recipe-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .recipe-op {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    cursor: grab;
+    user-select: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .recipe-op.drag-over { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .recipe-op.dragging { opacity: 0.4; }
+  .recipe-op-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .recipe-op-header:hover { background: #1f3060; }
+  .op-toggle {
+    width: 32px; height: 18px;
+    background: #444; border-radius: 9px;
+    position: relative; cursor: pointer;
+    border: none; flex-shrink: 0;
+    transition: background 0.2s;
+  }
+  .op-toggle::after {
+    content: '';
+    position: absolute;
+    width: 14px; height: 14px;
+    background: #fff; border-radius: 50%;
+    top: 2px; left: 2px;
+    transition: transform 0.2s;
+  }
+  .op-toggle.on { background: var(--accent2); }
+  .op-toggle.on::after { transform: translateX(14px); }
+  .op-name {
+    flex: 1;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .drag-handle {
+    color: var(--text-dim);
+    font-size: 1rem;
+    cursor: grab;
+  }
+  .recipe-op-body {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 0.82rem;
+  }
+  .recipe-op-body.collapsed { display: none; }
+  .field-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .field-row label {
+    color: var(--text-dim);
+    min-width: 80px;
+    font-size: 0.78rem;
+  }
+  .field-row input[type=number],
+  .field-row input[type=text],
+  .field-row select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 0.8rem;
+    width: 90px;
+  }
+  .field-row select { width: auto; }
+  .field-row input[type=checkbox] { accent-color: var(--accent2); }
+  .field-row input:focus, .field-row select:focus {
+    outline: none;
+    border-color: var(--accent2);
+  }
+  .field-row .unit { color: var(--text-dim); font-size: 0.75rem; }
+  .radio-group { display: flex; gap: 8px; flex-wrap: wrap; }
+  .radio-group label { display: flex; align-items: center; gap: 4px; cursor: pointer; min-width: unset; }
+  .recipe-actions {
+    padding: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  button {
+    cursor: pointer;
+    border: none;
+    border-radius: var(--radius);
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    transition: filter 0.15s, transform 0.1s;
+  }
+  button:active { transform: scale(0.97); }
+  button:hover { filter: brightness(1.15); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; transform: none; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn-success { background: var(--accent2); color: #fff; }
+  .btn-row { display: flex; gap: 8px; }
+  /* ── Right Panel ── */
+  .right-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    margin: 12px;
+    padding: 24px;
+    text-align: center;
+    color: var(--text-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .drop-zone.drag-active {
+    border-color: var(--accent);
+    background: rgba(233,69,96,0.08);
+    color: var(--text);
+  }
+  .drop-zone-inner { pointer-events: none; }
+  .drop-zone-icon { font-size: 2rem; margin-bottom: 8px; }
+  .drop-zone p { margin: 4px 0; font-size: 0.85rem; }
+  .drop-zone .hint { font-size: 0.75rem; color: var(--text-dim); }
+  #fileInput { display: none; }
+  .file-controls {
+    padding: 0 12px 8px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .file-controls .count-badge {
+    background: var(--surface);
+    color: var(--text-dim);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.78rem;
+    margin-left: auto;
+  }
+  .file-table-wrap {
+    flex: 1;
+    overflow: auto;
+    margin: 0 12px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+  thead th {
+    background: var(--panel);
+    color: var(--text-dim);
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    position: sticky; top: 0; z-index: 1;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  tbody tr:hover { background: var(--surface2); }
+  tbody tr.processing { background: rgba(15,155,142,0.08); }
+  tbody tr.done { background: rgba(76,175,80,0.05); }
+  tbody tr.failed { background: rgba(244,67,54,0.07); }
+  td { padding: 5px 10px; vertical-align: middle; }
+  .thumb-cell { width: 52px; }
+  .thumb {
+    width: 44px; height: 44px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .thumb-placeholder {
+    width: 44px; height: 44px;
+    background: var(--surface);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 0.65rem;
+  }
+  .status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .status-queued { background: var(--surface); color: var(--text-dim); }
+  .status-processing { background: rgba(15,155,142,0.3); color: var(--accent2); }
+  .status-done { background: rgba(76,175,80,0.25); color: #80e080; }
+  .status-failed { background: rgba(244,67,54,0.25); color: #f88; }
+  .savings { color: var(--accent2); font-weight: 600; }
+  .savings.negative { color: var(--warning); }
+  /* ── Progress Bar ── */
+  .progress-area {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    background: var(--panel);
+  }
+  .progress-bar-wrap {
+    background: var(--surface);
+    border-radius: 4px;
+    height: 10px;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent2), var(--accent));
+    border-radius: 4px;
+    width: 0%;
+    transition: width 0.3s;
+  }
+  .progress-info {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  /* ── Modal / Preview ── */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow: auto;
+    min-width: 500px;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    gap: 12px;
+  }
+  .modal-header h2 { font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .modal-close {
+    background: none; color: var(--text-dim); font-size: 1.2rem;
+    border: none; cursor: pointer; padding: 2px 6px; flex-shrink: 0;
+  }
+  .preview-pair {
+    display: flex; gap: 16px; align-items: flex-start;
+  }
+  .preview-half { flex: 1; text-align: center; }
+  .preview-half label {
+    display: block; margin-bottom: 6px;
+    font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase;
+  }
+  .preview-half img {
+    max-width: 100%; max-height: 60vh;
+    border: 1px solid var(--border); border-radius: 4px;
+  }
+  .preview-meta {
+    margin-top: 8px;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    text-align: center;
+  }
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #44446a; }
+  /* ── Notice ── */
+  .notice {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    padding: 4px 10px;
+    background: var(--surface2);
+    border-left: 3px solid var(--accent2);
+    border-radius: 2px;
+  }
+  .animated-gif-note {
+    font-size: 0.65rem;
+    color: var(--warning);
+    display: block;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🍳 ImageChef</h1>
+  <span class="tagline">Client-side image batch processor — nothing leaves your browser</span>
+</header>
+
+<div class="main-layout">
+  <!-- ── Left Panel: Recipe ── -->
+  <aside class="left-panel" aria-label="Recipe operations">
+    <div class="panel-header">Recipe</div>
+    <div class="recipe-list" id="recipeList" role="list" aria-label="Operations list">
+
+      <!-- 1. Resize -->
+      <div class="recipe-op" data-op="resize" draggable="true" role="listitem">
+        <div class="recipe-op-header">
+          <button class="op-toggle on" aria-label="Toggle Resize"></button>
+          <span class="op-name">Resize</span>
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+        </div>
+        <div class="recipe-op-body">
+          <div class="field-row">
+            <label>Mode</label>
+            <select id="resizeMode" aria-label="Resize mode">
+              <option value="fit">Fit within</option>
+              <option value="exact">Exact</option>
+              <option value="percent">Percentage</option>
+              <option value="longest">Longest edge cap</option>
+            </select>
+          </div>
+          <div class="field-row" id="resizeFitRow">
+            <label>Max W</label>
+            <input type="number" id="resizeW" value="1920" min="1" max="32000" aria-label="Max width">
+            <span class="unit">px</span>
+            <label style="min-width:20px">H</label>
+            <input type="number" id="resizeH" value="1080" min="1" max="32000" aria-label="Max height">
+            <span class="unit">px</span>
+          </div>
+          <div class="field-row" id="resizePercentRow" style="display:none">
+            <label>Scale</label>
+            <input type="number" id="resizePercent" value="75" min="1" max="200" aria-label="Scale percent">
+            <span class="unit">%</span>
+          </div>
+          <div class="field-row" id="resizeLongestRow" style="display:none">
+            <label>Longest edge</label>
+            <input type="number" id="resizeLongest" value="1600" min="1" max="32000" aria-label="Longest edge cap">
+            <span class="unit">px</span>
+          </div>
+          <div class="field-row">
+            <label></label>
+            <label style="min-width:unset;display:flex;gap:4px;align-items:center;cursor:pointer">
+              <input type="checkbox" id="neverUpscale" checked> Never upscale
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Compress -->
+      <div class="recipe-op" data-op="compress" draggable="true" role="listitem">
+        <div class="recipe-op-header">
+          <button class="op-toggle on" aria-label="Toggle Compress"></button>
+          <span class="op-name">Compress</span>
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+        </div>
+        <div class="recipe-op-body">
+          <div class="field-row">
+            <label>Mode</label>
+            <div class="radio-group">
+              <label><input type="radio" name="compressMode" value="per" checked> Per image</label>
+              <label><input type="radio" name="compressMode" value="total"> Total batch</label>
+            </div>
+          </div>
+          <div class="field-row" id="compressPerRow">
+            <label>Max per file</label>
+            <input type="number" id="compressPerKB" value="500" min="10" max="102400" aria-label="Per-file max KB">
+            <span class="unit">KB</span>
+          </div>
+          <div class="field-row" id="compressTotalRow" style="display:none">
+            <label>Total budget</label>
+            <input type="number" id="compressTotalMB" value="20" min="1" max="10000" aria-label="Total batch MB">
+            <span class="unit">MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Format Convert -->
+      <div class="recipe-op" data-op="format" draggable="true" role="listitem">
+        <div class="recipe-op-header">
+          <button class="op-toggle on" aria-label="Toggle Format Convert"></button>
+          <span class="op-name">Format Convert</span>
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+        </div>
+        <div class="recipe-op-body">
+          <div class="field-row">
+            <label>Output format</label>
+            <select id="formatOutput" aria-label="Output format">
+              <option value="jpeg">JPEG</option>
+              <option value="webp">WebP</option>
+              <option value="png">PNG</option>
+              <option value="keep" selected>Keep original</option>
+            </select>
+          </div>
+          <div class="notice">PNG with alpha channel is kept as PNG even when JPEG is selected.</div>
+        </div>
+      </div>
+
+      <!-- 4. Strip Metadata -->
+      <div class="recipe-op" data-op="strip" draggable="true" role="listitem">
+        <div class="recipe-op-header">
+          <button class="op-toggle on" aria-label="Toggle Strip Metadata"></button>
+          <span class="op-name">Strip Metadata</span>
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+        </div>
+        <div class="recipe-op-body">
+          <div class="notice">EXIF, XMP, and ICC metadata are removed automatically during canvas re-encode. sRGB color space flattening may occur for wide-gamut images.</div>
+        </div>
+      </div>
+
+      <!-- 5. Rename -->
+      <div class="recipe-op" data-op="rename" draggable="true" role="listitem">
+        <div class="recipe-op-header">
+          <button class="op-toggle on" aria-label="Toggle Rename"></button>
+          <span class="op-name">Rename</span>
+          <span class="drag-handle" title="Drag to reorder">⠿</span>
+        </div>
+        <div class="recipe-op-body">
+          <div class="field-row">
+            <label>Pattern</label>
+            <input type="text" id="renamePattern" value="{name}" style="width:150px" aria-label="Rename pattern">
+          </div>
+          <div class="notice">Tokens: {name} {index} {width}x{height} {date}</div>
+        </div>
+      </div>
+
+    </div><!-- /recipe-list -->
+
+    <div class="recipe-actions">
+      <button class="btn-secondary" id="emailPresetBtn" title="Set up recipe for emailing photos">📧 Email Preset</button>
+      <div class="btn-row">
+        <button class="btn-primary" id="bakeBtn" style="flex:1" disabled>🍳 Bake!</button>
+        <button class="btn-success" id="downloadZipBtn" disabled>⬇ ZIP</button>
+      </div>
+      <button class="btn-secondary" id="downloadIndivBtn" disabled style="font-size:0.78rem">⬇ Download individually</button>
+    </div>
+  </aside>
+
+  <!-- ── Right Panel: Files ── -->
+  <main class="right-panel" aria-label="File list">
+
+    <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Drop images or zip archive, or click to pick files">
+      <div class="drop-zone-inner">
+        <div class="drop-zone-icon">🖼️</div>
+        <p><strong>Drop images or zip archives here</strong></p>
+        <p class="hint">or click to browse &nbsp;·&nbsp; JPEG, PNG, WebP, BMP, HEIC</p>
+      </div>
+      <input type="file" id="fileInput" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.zip" aria-label="File input">
+    </div>
+
+    <div class="file-controls">
+      <button class="btn-secondary" id="folderPickBtn" style="font-size:0.78rem">📁 Pick files</button>
+      <input type="file" id="folderInput" webkitdirectory multiple style="display:none" aria-label="Folder input">
+      <button class="btn-secondary" id="clearFilesBtn" style="font-size:0.78rem" disabled>✕ Clear all</button>
+      <span class="count-badge" id="countBadge">0 files</span>
+    </div>
+
+    <div class="file-table-wrap">
+      <table aria-label="Image file list">
+        <thead>
+          <tr>
+            <th class="thumb-cell">Preview</th>
+            <th>Name</th>
+            <th>Dimensions</th>
+            <th>Original Size</th>
+            <th>Output Size</th>
+            <th>Saved</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="fileTableBody">
+          <tr id="emptyRow">
+            <td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">
+              Add images to get started
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="progress-area">
+      <div class="progress-bar-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBarWrap">
+        <div class="progress-bar-fill" id="progressBarFill"></div>
+      </div>
+      <div class="progress-info">
+        <span id="progressText">Ready</span>
+        <span id="sizeTotals"></span>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Preview Modal -->
+<div class="modal-overlay" id="previewModal" role="dialog" aria-modal="true" aria-label="Preview comparison">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="previewTitle">Before / After</h2>
+      <button class="modal-close" id="previewClose" aria-label="Close preview">✕</button>
+    </div>
+    <div class="preview-pair">
+      <div class="preview-half">
+        <label>Before</label>
+        <img id="previewBefore" src="" alt="Original image">
+        <div class="preview-meta" id="previewBeforeMeta"></div>
+      </div>
+      <div class="preview-half">
+        <label>After</label>
+        <img id="previewAfter" src="" alt="Processed image">
+        <div class="preview-meta" id="previewAfterMeta"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════════════════
+const state = {
+  files: [],   // FileEntry objects
+  baking: false,
+};
+
+let heic2anyLoaded = false;
+let heic2anyLoading = null; // Promise while loading
+
+// ═══════════════════════════════════════════════════════════════
+// DOM refs
+// ═══════════════════════════════════════════════════════════════
+const dropZone         = document.getElementById('dropZone');
+const fileInput        = document.getElementById('fileInput');
+const folderInput      = document.getElementById('folderInput');
+const folderPickBtn    = document.getElementById('folderPickBtn');
+const clearFilesBtn    = document.getElementById('clearFilesBtn');
+const fileTableBody    = document.getElementById('fileTableBody');
+const emptyRow         = document.getElementById('emptyRow');
+const countBadge       = document.getElementById('countBadge');
+const progressBarFill  = document.getElementById('progressBarFill');
+const progressBarWrap  = document.getElementById('progressBarWrap');
+const progressText     = document.getElementById('progressText');
+const sizeTotals       = document.getElementById('sizeTotals');
+const bakeBtn          = document.getElementById('bakeBtn');
+const downloadZipBtn   = document.getElementById('downloadZipBtn');
+const downloadIndivBtn = document.getElementById('downloadIndivBtn');
+const emailPresetBtn   = document.getElementById('emailPresetBtn');
+const previewModal     = document.getElementById('previewModal');
+const previewClose     = document.getElementById('previewClose');
+const previewBefore    = document.getElementById('previewBefore');
+const previewAfter     = document.getElementById('previewAfter');
+const previewTitle     = document.getElementById('previewTitle');
+const previewBeforeMeta= document.getElementById('previewBeforeMeta');
+const previewAfterMeta = document.getElementById('previewAfterMeta');
+const recipeList       = document.getElementById('recipeList');
+
+// ═══════════════════════════════════════════════════════════════
+// Utility helpers
+// ═══════════════════════════════════════════════════════════════
+function fmtBytes(b) {
+  if (b == null || b < 0) return '—';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(2) + ' MB';
+}
+
+function fmtPct(orig, out) {
+  if (!orig || out == null) return null;
+  const saved = (orig - out) / orig * 100;
+  return { pct: saved, str: (saved >= 0 ? '-' : '+') + Math.abs(saved).toFixed(1) + '%' };
+}
+
+function uid() { return Math.random().toString(36).slice(2, 10); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const SUPPORTED_EXTS = new Set(['jpg','jpeg','png','webp','gif','bmp','heic','heif']);
+
+function extOf(name) { return (name.split('.').pop() || '').toLowerCase(); }
+
+function mimeToExt(mime) {
+  return { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[mime] || 'jpg';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HEIC lazy loader
+// ═══════════════════════════════════════════════════════════════
+function ensureHeic2any() {
+  if (heic2anyLoaded) return Promise.resolve();
+  if (heic2anyLoading) return heic2anyLoading;
+  heic2anyLoading = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js';
+    s.crossOrigin = 'anonymous';
+    s.onload = () => { heic2anyLoaded = true; res(); };
+    s.onerror = () => rej(new Error('heic2any failed to load'));
+    document.head.appendChild(s);
+  });
+  return heic2anyLoading;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// File ingestion
+// ═══════════════════════════════════════════════════════════════
+async function addFiles(fileList) {
+  const before = state.files.length;
+  for (const f of fileList) {
+    const ext = extOf(f.name);
+    if (!SUPPORTED_EXTS.has(ext)) continue;
+    // Deduplicate by name+size
+    if (state.files.find(e => e.file.name === f.name && e.file.size === f.size)) continue;
+    const entry = {
+      id: uid(),
+      file: f,
+      name: f.name,
+      origSize: f.size,
+      dims: null,
+      outDims: null,
+      status: 'queued',
+      origUrl: null,
+      origBlob: null,
+      outBlob: null,
+      outUrl: null,
+      thumbUrl: null,
+      row: null,
+      isAnimated: false,
+      outName: f.name,
+    };
+    state.files.push(entry);
+    addTableRow(entry);
+    loadThumbAndDims(entry); // async, no await
+  }
+  if (state.files.length !== before) {
+    updateEmptyRow();
+    updateFileCount();
+    updateBakeBtn();
+  }
+}
+
+async function loadThumbAndDims(entry) {
+  try {
+    const ext = extOf(entry.name);
+    let blob = entry.file;
+
+    if (ext === 'heic' || ext === 'heif') {
+      await ensureHeic2any();
+      let converted = await heic2any({ blob: entry.file, toType: 'image/jpeg', quality: 0.75 });
+      if (Array.isArray(converted)) converted = converted[0];
+      blob = converted;
+    }
+
+    const url = URL.createObjectURL(blob);
+    entry.origUrl = url;
+    entry.origBlob = blob;
+
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('img load failed'));
+      i.src = url;
+    });
+
+    entry.dims = { w: img.naturalWidth, h: img.naturalHeight };
+
+    if (ext === 'gif') {
+      entry.isAnimated = await isAnimatedGif(entry.file);
+    }
+
+    // Thumbnail canvas
+    const ts = 44;
+    const ar = img.naturalWidth / img.naturalHeight;
+    const tw = ar >= 1 ? ts : Math.round(ts * ar);
+    const th = ar >= 1 ? Math.round(ts / ar) : ts;
+    const thumb = document.createElement('canvas');
+    thumb.width = tw; thumb.height = th;
+    thumb.getContext('2d').drawImage(img, 0, 0, tw, th);
+    entry.thumbUrl = thumb.toDataURL('image/jpeg', 0.7);
+
+    updateRowThumb(entry);
+    updateRowDims(entry);
+  } catch (e) {
+    console.warn('Thumbnail load failed for', entry.name, e.message);
+  }
+}
+
+async function isAnimatedGif(file) {
+  const buf = await file.slice(0, 8192).arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let count = 0;
+  for (let i = 0; i < bytes.length - 3; i++) {
+    if (bytes[i] === 0x00 && bytes[i+1] === 0x21 &&
+        bytes[i+2] === 0xF9 && bytes[i+3] === 0x04) {
+      if (++count > 1) return true;
+    }
+  }
+  return false;
+}
+
+// Walk a DataTransferEntry recursively
+async function walkEntry(entry) {
+  if (entry.isFile) {
+    return new Promise(res => entry.file(f => res([f]), () => res([])));
+  }
+  if (entry.isDirectory) {
+    const reader = entry.createReader();
+    const allFiles = [];
+    let batch;
+    do {
+      batch = await new Promise(res => reader.readEntries(res, () => res([])));
+      for (const child of batch) {
+        const sub = await walkEntry(child);
+        allFiles.push(...sub);
+      }
+    } while (batch.length === 100); // readEntries returns max 100 at a time
+    return allFiles;
+  }
+  return [];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Table row management
+// ═══════════════════════════════════════════════════════════════
+function addTableRow(entry) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = entry.id;
+  tr.innerHTML = `
+    <td class="thumb-cell"><div class="thumb-placeholder" id="thumb-${entry.id}">…</div></td>
+    <td id="name-${entry.id}">${escHtml(entry.name)}</td>
+    <td id="dims-${entry.id}">—</td>
+    <td>${fmtBytes(entry.origSize)}</td>
+    <td id="outsize-${entry.id}">—</td>
+    <td id="savings-${entry.id}">—</td>
+    <td><span class="status-badge status-queued" id="status-${entry.id}">Queued</span></td>
+  `;
+  tr.addEventListener('click', () => openPreview(entry));
+  fileTableBody.appendChild(tr);
+  entry.row = tr;
+}
+
+function updateRowThumb(entry) {
+  const el = document.getElementById('thumb-' + entry.id);
+  if (!el || !entry.thumbUrl) return;
+  const img = document.createElement('img');
+  img.src = entry.thumbUrl;
+  img.className = 'thumb';
+  img.alt = entry.name;
+  el.replaceWith(img);
+  if (entry.isAnimated) {
+    const note = document.createElement('span');
+    note.className = 'animated-gif-note';
+    note.textContent = '1st frame';
+    entry.row.querySelector('td').appendChild(note);
+  }
+}
+
+function updateRowDims(entry) {
+  const el = document.getElementById('dims-' + entry.id);
+  if (!el) return;
+  if (entry.dims) {
+    let s = entry.dims.w + '×' + entry.dims.h;
+    if (entry.outDims && (entry.outDims.w !== entry.dims.w || entry.outDims.h !== entry.dims.h)) {
+      s += ' → ' + entry.outDims.w + '×' + entry.outDims.h;
+    }
+    el.textContent = s;
+  }
+}
+
+function updateRowStatus(entry) {
+  const statusEl = document.getElementById('status-' + entry.id);
+  if (statusEl) {
+    statusEl.className = 'status-badge status-' + entry.status;
+    statusEl.textContent = { queued: 'Queued', processing: 'Processing…', done: 'Done', failed: 'Failed' }[entry.status] || entry.status;
+  }
+  if (entry.row) {
+    entry.row.className = entry.status === 'done' ? 'done'
+      : entry.status === 'failed' ? 'failed'
+      : entry.status === 'processing' ? 'processing' : '';
+  }
+  if (entry.outBlob) {
+    const outsizeEl = document.getElementById('outsize-' + entry.id);
+    if (outsizeEl) outsizeEl.textContent = fmtBytes(entry.outBlob.size);
+    const savingsEl = document.getElementById('savings-' + entry.id);
+    if (savingsEl) {
+      const r = fmtPct(entry.origSize, entry.outBlob.size);
+      if (r) {
+        savingsEl.innerHTML = `<span class="savings${r.pct < 0 ? ' negative' : ''}">${r.str}</span>`;
+      }
+    }
+  }
+  if (entry.outName && entry.outName !== entry.name) {
+    const nameEl = document.getElementById('name-' + entry.id);
+    if (nameEl) {
+      nameEl.innerHTML = escHtml(entry.name) + '<br><small style="color:var(--accent2)">' + escHtml(entry.outName) + '</small>';
+    }
+  }
+  updateRowDims(entry);
+}
+
+function updateEmptyRow() {
+  emptyRow.style.display = state.files.length ? 'none' : '';
+}
+
+function updateFileCount() {
+  const n = state.files.length;
+  countBadge.textContent = n + ' file' + (n !== 1 ? 's' : '');
+  clearFilesBtn.disabled = n === 0;
+}
+
+function updateBakeBtn() {
+  bakeBtn.disabled = state.files.length === 0 || state.baking;
+}
+
+function updateProgress(done, total, origBytes, outBytes) {
+  const pct = total ? Math.round(done / total * 100) : 0;
+  progressBarFill.style.width = pct + '%';
+  progressBarWrap.setAttribute('aria-valuenow', pct);
+  if (total === 0) {
+    progressText.textContent = 'Ready';
+    sizeTotals.textContent = '';
+  } else {
+    progressText.textContent = `${done} / ${total} (${pct}%)`;
+    if (origBytes > 0) {
+      sizeTotals.textContent = `${fmtBytes(origBytes)} → ${fmtBytes(outBytes)}`;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Recipe getters
+// ═══════════════════════════════════════════════════════════════
+function isOpEnabled(opName) {
+  const op = document.querySelector(`.recipe-op[data-op="${opName}"]`);
+  return op ? op.querySelector('.op-toggle').classList.contains('on') : false;
+}
+
+function getRecipe() {
+  return {
+    resize: {
+      enabled: isOpEnabled('resize'),
+      mode: document.getElementById('resizeMode').value,
+      w: parseInt(document.getElementById('resizeW').value) || 1920,
+      h: parseInt(document.getElementById('resizeH').value) || 1080,
+      percent: parseFloat(document.getElementById('resizePercent').value) || 75,
+      longest: parseInt(document.getElementById('resizeLongest').value) || 1600,
+      neverUpscale: document.getElementById('neverUpscale').checked,
+    },
+    compress: {
+      enabled: isOpEnabled('compress'),
+      mode: (document.querySelector('input[name=compressMode]:checked') || {}).value || 'per',
+      perKB: parseFloat(document.getElementById('compressPerKB').value) || 500,
+      totalMB: parseFloat(document.getElementById('compressTotalMB').value) || 20,
+    },
+    format: {
+      enabled: isOpEnabled('format'),
+      output: document.getElementById('formatOutput').value,
+    },
+    strip: { enabled: isOpEnabled('strip') },
+    rename: {
+      enabled: isOpEnabled('rename'),
+      pattern: document.getElementById('renamePattern').value || '{name}',
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Image processing engine
+// ═══════════════════════════════════════════════════════════════
+const MAX_CANVAS_DIM = 16384;
+
+async function decodeToImageBitmap(entry) {
+  const ext = extOf(entry.name);
+  let blob = entry.file;
+
+  if (ext === 'heic' || ext === 'heif') {
+    await ensureHeic2any();
+    let converted = await heic2any({ blob: entry.file, toType: 'image/jpeg', quality: 0.92 });
+    if (Array.isArray(converted)) converted = converted[0];
+    blob = converted;
+  }
+
+  // Detect animated gif / first-frame only
+  if (ext === 'gif' && entry.isAnimated) {
+    // Draw via img element to get first frame
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((res, rej) => {
+        const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url;
+      });
+      const bmp = await createImageBitmap(img, { resizeQuality: 'high' });
+      URL.revokeObjectURL(url);
+      return { bitmap: bmp, ext };
+    } catch (e) {
+      URL.revokeObjectURL(url);
+      throw e;
+    }
+  }
+
+  try {
+    const bmp = await createImageBitmap(blob, { resizeQuality: 'high' });
+    return { bitmap: bmp, ext };
+  } catch {
+    // Fallback: use HTMLImageElement
+    const url = URL.createObjectURL(blob);
+    const img = await new Promise((res, rej) => {
+      const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode failed')); i.src = url;
+    });
+    const bmp = await createImageBitmap(img);
+    URL.revokeObjectURL(url);
+    return { bitmap: bmp, ext };
+  }
+}
+
+function computeTargetDims(srcW, srcH, resize) {
+  if (!resize.enabled) return { w: srcW, h: srcH };
+  let tw, th;
+  const { mode, neverUpscale } = resize;
+
+  if (mode === 'fit' || mode === 'exact') {
+    const scale = Math.min(resize.w / srcW, resize.h / srcH);
+    if (neverUpscale && scale > 1) { tw = srcW; th = srcH; }
+    else { tw = Math.round(srcW * scale); th = Math.round(srcH * scale); }
+  } else if (mode === 'percent') {
+    const s = resize.percent / 100;
+    if (neverUpscale && s > 1) { tw = srcW; th = srcH; }
+    else { tw = Math.round(srcW * s); th = Math.round(srcH * s); }
+  } else if (mode === 'longest') {
+    const longest = Math.max(srcW, srcH);
+    if (neverUpscale && resize.longest >= longest) { tw = srcW; th = srcH; }
+    else {
+      const scale = resize.longest / longest;
+      tw = Math.round(srcW * scale);
+      th = Math.round(srcH * scale);
+    }
+  } else {
+    tw = srcW; th = srcH;
+  }
+
+  // Guard against canvas size limits
+  const clampScale = Math.min(MAX_CANVAS_DIM / tw, MAX_CANVAS_DIM / th, 1);
+  tw = Math.max(1, Math.round(tw * clampScale));
+  th = Math.max(1, Math.round(th * clampScale));
+  return { w: tw, h: th };
+}
+
+function drawStepped(source, srcW, srcH, dstW, dstH) {
+  // For large downscale ratios (>2×), use intermediate halving steps
+  const ratio = Math.max(srcW / dstW, srcH / dstH);
+  let cur = source;
+  let cw = srcW, ch = srcH;
+
+  if (ratio > 2) {
+    while (cw / dstW > 2 || ch / dstH > 2) {
+      const sw = Math.max(Math.round(cw / 2), dstW);
+      const sh = Math.max(Math.round(ch / 2), dstH);
+      const step = document.createElement('canvas');
+      step.width = sw; step.height = sh;
+      step.getContext('2d').drawImage(cur, 0, 0, sw, sh);
+      cur = step;
+      cw = sw; ch = sh;
+    }
+  }
+
+  const out = document.createElement('canvas');
+  out.width = dstW; out.height = dstH;
+  out.getContext('2d').drawImage(cur, 0, 0, dstW, dstH);
+  return out;
+}
+
+function sampleAlpha(canvas) {
+  // Sample a grid of pixels to detect transparency
+  try {
+    const ctx = canvas.getContext('2d');
+    const sw = Math.min(canvas.width, 128);
+    const sh = Math.min(canvas.height, 128);
+    const data = ctx.getImageData(0, 0, sw, sh).data;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
+function chooseMime(recipe, ext, hasAlpha) {
+  const out = recipe.format.enabled ? recipe.format.output : 'keep';
+
+  if (out === 'keep') {
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'png') return 'image/png';
+    if (ext === 'webp') return 'image/webp';
+    // gif/bmp/heic/heif → jpeg by default
+    return 'image/jpeg';
+  }
+  if (out === 'jpeg') return hasAlpha ? 'image/png' : 'image/jpeg';
+  if (out === 'webp') return 'image/webp';
+  if (out === 'png') return 'image/png';
+  return 'image/jpeg';
+}
+
+async function canvasToBlob(canvas, mime, quality) {
+  return new Promise((res, rej) => {
+    if (mime === 'image/png') {
+      canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob null')), mime);
+    } else {
+      canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob null')), mime, quality);
+    }
+  });
+}
+
+async function binarySearchQuality(canvas, mime, targetBytes, lo = 0.30, hi = 0.95, iters = 6) {
+  let bestBlob = null;
+  for (let i = 0; i < iters; i++) {
+    const q = (lo + hi) / 2;
+    const blob = await canvasToBlob(canvas, mime, q);
+    if (blob.size <= targetBytes) {
+      bestBlob = blob;
+      lo = q;
+    } else {
+      hi = q;
+    }
+  }
+  if (!bestBlob) {
+    // Even q=0.30 overshoots — return the minimum quality blob
+    bestBlob = await canvasToBlob(canvas, mime, lo);
+  }
+  return bestBlob;
+}
+
+async function compressToTarget(canvas, mime, targetBytes) {
+  let blob = await binarySearchQuality(canvas, mime, targetBytes);
+  if (blob.size <= targetBytes) return { blob, canvas };
+
+  // Dimension reduction loop: scale by ×0.9 each attempt
+  let cur = canvas;
+  for (let attempt = 0; attempt < 8 && blob.size > targetBytes; attempt++) {
+    const nw = Math.max(1, Math.round(cur.width * 0.9));
+    const nh = Math.max(1, Math.round(cur.height * 0.9));
+    const scaled = document.createElement('canvas');
+    scaled.width = nw; scaled.height = nh;
+    scaled.getContext('2d').drawImage(cur, 0, 0, nw, nh);
+    cur = scaled;
+    blob = await binarySearchQuality(cur, mime, targetBytes);
+  }
+  return { blob, canvas: cur };
+}
+
+function buildOutputName(recipe, origName, index, outW, outH, mime) {
+  const outExt = mimeToExt(mime);
+  const namePart = origName.replace(/\.[^.]+$/, '');
+
+  if (!recipe.rename.enabled) {
+    return namePart + '.' + outExt;
+  }
+
+  const today = new Date();
+  const date = today.getFullYear()
+    + '-' + String(today.getMonth() + 1).padStart(2, '0')
+    + '-' + String(today.getDate()).padStart(2, '0');
+
+  const result = recipe.rename.pattern
+    .replace(/{name}/g, namePart)
+    .replace(/{index}/g, String(index + 1).padStart(3, '0'))
+    .replace(/{width}x{height}/g, outW + 'x' + outH)
+    .replace(/{date}/g, date);
+
+  // Ensure extension
+  const hasExt = /\.[a-z0-9]+$/i.test(result);
+  return hasExt ? result : result + '.' + outExt;
+}
+
+async function processEntry(entry, recipe, index, perFileBudgetBytes) {
+  entry.status = 'processing';
+  updateRowStatus(entry);
+
+  try {
+    const { bitmap, ext } = await decodeToImageBitmap(entry);
+    const srcW = bitmap.width, srcH = bitmap.height;
+    if (!entry.dims) entry.dims = { w: srcW, h: srcH };
+
+    // 1. Compute target dimensions
+    const { w: dstW, h: dstH } = computeTargetDims(srcW, srcH, recipe.resize);
+
+    // 2. Draw (with stepping for large downscales)
+    const canvas = drawStepped(bitmap, srcW, srcH, dstW, dstH);
+    bitmap.close && bitmap.close();
+
+    // 3. Detect alpha
+    const hasAlpha = sampleAlpha(canvas);
+
+    // 4. Choose output MIME
+    const mime = chooseMime(recipe, ext, hasAlpha);
+
+    // 5. Compress / encode
+    let outBlob, outCanvas = canvas;
+
+    if (!recipe.compress.enabled || mime === 'image/png') {
+      // PNG: lossless; no budget enforcement
+      outBlob = await canvasToBlob(canvas, mime, mime === 'image/png' ? undefined : 0.88);
+    } else {
+      const targetBytes = perFileBudgetBytes != null
+        ? perFileBudgetBytes
+        : recipe.compress.perKB * 1024;
+      const result = await compressToTarget(canvas, mime, targetBytes);
+      outBlob = result.blob;
+      outCanvas = result.canvas;
+    }
+
+    entry.outDims = { w: outCanvas.width, h: outCanvas.height };
+    entry.outBlob = outBlob;
+    if (entry.outUrl) URL.revokeObjectURL(entry.outUrl);
+    entry.outUrl = URL.createObjectURL(outBlob);
+
+    // 6. Rename
+    entry.outName = buildOutputName(recipe, entry.name, index, outCanvas.width, outCanvas.height, mime);
+
+    entry.status = 'done';
+  } catch (e) {
+    console.error('Failed:', entry.name, e);
+    entry.status = 'failed';
+  }
+
+  updateRowStatus(entry);
+}
+
+// Concurrency pool
+async function processPool(entries, recipe, concurrency) {
+  const total = entries.length;
+  let nextIdx = 0;
+  let doneCount = 0;
+
+  // Compute per-file budget for total-batch mode
+  let perFileBudget = null;
+  if (recipe.compress.enabled && recipe.compress.mode === 'total') {
+    perFileBudget = Math.floor((recipe.compress.totalMB * 1024 * 1024) / total);
+  }
+
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= entries.length) break;
+      await processEntry(entries[i], recipe, i, perFileBudget);
+      doneCount++;
+      const origBytes = entries.slice(0, doneCount).reduce((s, e) => s + e.origSize, 0);
+      const outBytes = entries.slice(0, doneCount).reduce((s, e) => s + (e.outBlob ? e.outBlob.size : e.origSize), 0);
+      updateProgress(doneCount, total, origBytes, outBytes);
+      // Yield to browser between images
+      await sleep(0);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, worker));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Bake
+// ═══════════════════════════════════════════════════════════════
+async function bake() {
+  if (state.baking || state.files.length === 0) return;
+  state.baking = true;
+  bakeBtn.disabled = true;
+  bakeBtn.textContent = '⏳ Baking…';
+  downloadZipBtn.disabled = true;
+  downloadIndivBtn.disabled = true;
+
+  const recipe = getRecipe();
+  // Reset all entries
+  for (const e of state.files) {
+    e.status = 'queued';
+    e.outBlob = null;
+    if (e.outUrl) { URL.revokeObjectURL(e.outUrl); e.outUrl = null; }
+    updateRowStatus(e);
+  }
+  updateProgress(0, state.files.length, 0, 0);
+
+  try {
+    await processPool(state.files, recipe, 3);
+  } finally {
+    state.baking = false;
+    bakeBtn.disabled = false;
+    bakeBtn.textContent = '🍳 Bake!';
+    const anyDone = state.files.some(e => e.status === 'done');
+    downloadZipBtn.disabled = !anyDone;
+    downloadIndivBtn.disabled = !anyDone;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Download
+// ═══════════════════════════════════════════════════════════════
+async function downloadZip() {
+  const done = state.files.filter(e => e.status === 'done' && e.outBlob);
+  if (!done.length) return;
+  downloadZipBtn.disabled = true;
+  downloadZipBtn.textContent = '⏳ Zipping…';
+  try {
+    const zip = new JSZip();
+    const usedNames = new Map();
+    for (const entry of done) {
+      let name = entry.outName || entry.name;
+      const key = name.toLowerCase();
+      if (usedNames.has(key)) {
+        const n = usedNames.get(key) + 1;
+        usedNames.set(key, n);
+        const dot = name.lastIndexOf('.');
+        name = dot >= 0
+          ? name.slice(0, dot) + '_' + n + name.slice(dot)
+          : name + '_' + n;
+      } else {
+        usedNames.set(key, 1);
+      }
+      zip.file(name, entry.outBlob, { compression: 'STORE' });
+    }
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    triggerDownload(zipBlob, 'imagechef-output.zip');
+  } catch (e) {
+    console.error('ZIP failed', e);
+    alert('ZIP creation failed: ' + e.message);
+  } finally {
+    downloadZipBtn.disabled = false;
+    downloadZipBtn.textContent = '⬇ ZIP';
+  }
+}
+
+async function downloadIndividually() {
+  const done = state.files.filter(e => e.status === 'done' && e.outUrl);
+  for (const entry of done) {
+    const a = document.createElement('a');
+    a.href = entry.outUrl;
+    a.download = entry.outName || entry.name;
+    a.click();
+    await sleep(120);
+  }
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Preview modal
+// ═══════════════════════════════════════════════════════════════
+function openPreview(entry) {
+  if (!entry.origUrl) return;
+  previewTitle.textContent = escHtml(entry.outName || entry.name);
+  previewBefore.src = entry.origUrl;
+  previewBeforeMeta.textContent = fmtBytes(entry.origSize) + (entry.dims ? ' · ' + entry.dims.w + '×' + entry.dims.h : '');
+  if (entry.outUrl) {
+    previewAfter.src = entry.outUrl;
+    previewAfter.style.opacity = '1';
+    previewAfterMeta.textContent = fmtBytes(entry.outBlob?.size) + (entry.outDims ? ' · ' + entry.outDims.w + '×' + entry.outDims.h : '');
+  } else {
+    previewAfter.src = entry.origUrl;
+    previewAfter.style.opacity = '0.4';
+    previewAfterMeta.textContent = 'Not yet processed';
+  }
+  previewModal.classList.add('open');
+}
+
+previewClose.addEventListener('click', () => previewModal.classList.remove('open'));
+previewModal.addEventListener('click', e => { if (e.target === previewModal) previewModal.classList.remove('open'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') previewModal.classList.remove('open'); });
+
+// ═══════════════════════════════════════════════════════════════
+// Email preset
+// ═══════════════════════════════════════════════════════════════
+emailPresetBtn.addEventListener('click', () => {
+  // Resize: longest edge 1600, never upscale
+  const resizeOp = document.querySelector('.recipe-op[data-op="resize"]');
+  resizeOp.querySelector('.op-toggle').classList.add('on');
+  resizeOp.querySelector('.recipe-op-body').classList.remove('collapsed');
+  document.getElementById('resizeMode').value = 'longest';
+  document.getElementById('resizeLongest').value = '1600';
+  document.getElementById('neverUpscale').checked = true;
+  updateResizeModeUI();
+
+  // Compress: total 20 MB
+  const compressOp = document.querySelector('.recipe-op[data-op="compress"]');
+  compressOp.querySelector('.op-toggle').classList.add('on');
+  compressOp.querySelector('.recipe-op-body').classList.remove('collapsed');
+  document.querySelector('input[name=compressMode][value="total"]').checked = true;
+  document.getElementById('compressTotalMB').value = '20';
+  updateCompressModeUI();
+
+  // Format: JPEG
+  const formatOp = document.querySelector('.recipe-op[data-op="format"]');
+  formatOp.querySelector('.op-toggle').classList.add('on');
+  formatOp.querySelector('.recipe-op-body').classList.remove('collapsed');
+  document.getElementById('formatOutput').value = 'jpeg';
+
+  emailPresetBtn.textContent = '✓ Applied!';
+  setTimeout(() => { emailPresetBtn.textContent = '📧 Email Preset'; }, 2000);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Recipe UI — dynamic fields
+// ═══════════════════════════════════════════════════════════════
+function updateResizeModeUI() {
+  const mode = document.getElementById('resizeMode').value;
+  document.getElementById('resizeFitRow').style.display = (mode === 'fit' || mode === 'exact') ? '' : 'none';
+  document.getElementById('resizePercentRow').style.display = mode === 'percent' ? '' : 'none';
+  document.getElementById('resizeLongestRow').style.display = mode === 'longest' ? '' : 'none';
+}
+
+function updateCompressModeUI() {
+  const mode = (document.querySelector('input[name=compressMode]:checked') || {}).value;
+  document.getElementById('compressPerRow').style.display = mode !== 'total' ? '' : 'none';
+  document.getElementById('compressTotalRow').style.display = mode === 'total' ? '' : 'none';
+}
+
+document.getElementById('resizeMode').addEventListener('change', updateResizeModeUI);
+document.querySelectorAll('input[name=compressMode]').forEach(r => r.addEventListener('change', updateCompressModeUI));
+
+// Toggle buttons
+document.querySelectorAll('.op-toggle').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    btn.classList.toggle('on');
+    const body = btn.closest('.recipe-op').querySelector('.recipe-op-body');
+    if (body) body.classList.toggle('collapsed', !btn.classList.contains('on'));
+  });
+});
+
+// Collapse/expand on header click (not on toggle)
+document.querySelectorAll('.recipe-op-header').forEach(hdr => {
+  hdr.addEventListener('click', e => {
+    if (e.target.classList.contains('op-toggle')) return;
+    const body = hdr.closest('.recipe-op').querySelector('.recipe-op-body');
+    if (body) body.classList.toggle('collapsed');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Drag-to-reorder recipe ops
+// ═══════════════════════════════════════════════════════════════
+let dragSrcOp = null;
+
+recipeList.addEventListener('dragstart', e => {
+  dragSrcOp = e.target.closest('.recipe-op');
+  if (dragSrcOp) {
+    dragSrcOp.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  }
+});
+recipeList.addEventListener('dragend', () => {
+  if (dragSrcOp) dragSrcOp.classList.remove('dragging');
+  recipeList.querySelectorAll('.recipe-op.drag-over').forEach(el => el.classList.remove('drag-over'));
+  dragSrcOp = null;
+});
+recipeList.addEventListener('dragover', e => {
+  e.preventDefault();
+  const target = e.target.closest('.recipe-op');
+  if (!target || target === dragSrcOp) return;
+  recipeList.querySelectorAll('.recipe-op.drag-over').forEach(el => el.classList.remove('drag-over'));
+  target.classList.add('drag-over');
+  e.dataTransfer.dropEffect = 'move';
+});
+recipeList.addEventListener('drop', e => {
+  e.preventDefault();
+  const target = e.target.closest('.recipe-op');
+  if (!target || target === dragSrcOp || !dragSrcOp) return;
+  target.classList.remove('drag-over');
+  const ops = [...recipeList.querySelectorAll('.recipe-op')];
+  const si = ops.indexOf(dragSrcOp);
+  const ti = ops.indexOf(target);
+  if (si < ti) recipeList.insertBefore(dragSrcOp, target.nextSibling);
+  else recipeList.insertBefore(dragSrcOp, target);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// File input events
+// ═══════════════════════════════════════════════════════════════
+dropZone.addEventListener('click', e => { if (e.target === dropZone || e.target.closest('.drop-zone-inner')) fileInput.click(); });
+dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) addFiles(fileInput.files);
+  fileInput.value = '';
+});
+
+folderPickBtn.addEventListener('click', () => folderInput.click());
+folderInput.addEventListener('change', () => {
+  if (folderInput.files.length) addFiles(folderInput.files);
+  folderInput.value = '';
+});
+
+// Drag-and-drop onto the drop zone
+dropZone.addEventListener('dragenter', e => { e.preventDefault(); dropZone.classList.add('drag-active'); });
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-active'); });
+dropZone.addEventListener('dragleave', e => {
+  if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drag-active');
+});
+dropZone.addEventListener('drop', async e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-active');
+  const dtItems = [...(e.dataTransfer.items || [])];
+  if (dtItems.length && dtItems[0].webkitGetAsEntry) {
+    const allFiles = [];
+    for (const item of dtItems) {
+      const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+      if (entry) {
+        const files = await walkEntry(entry);
+        allFiles.push(...files);
+      }
+    }
+    if (allFiles.length) { addFiles(allFiles); return; }
+  }
+  addFiles(e.dataTransfer.files);
+});
+
+// Also allow dropping onto the whole right panel
+document.querySelector('.right-panel').addEventListener('dragover', e => {
+  if (!e.target.closest('#dropZone')) { e.preventDefault(); dropZone.classList.add('drag-active'); }
+});
+document.querySelector('.right-panel').addEventListener('drop', e => {
+  if (!e.target.closest('#dropZone')) {
+    e.preventDefault();
+    dropZone.classList.remove('drag-active');
+    const fake = new DragEvent('drop', { dataTransfer: e.dataTransfer, bubbles: false });
+    dropZone.dispatchEvent(fake);
+  }
+});
+
+bakeBtn.addEventListener('click', bake);
+downloadZipBtn.addEventListener('click', downloadZip);
+downloadIndivBtn.addEventListener('click', downloadIndividually);
+
+clearFilesBtn.addEventListener('click', () => {
+  for (const e of state.files) {
+    if (e.origUrl) URL.revokeObjectURL(e.origUrl);
+    if (e.outUrl) URL.revokeObjectURL(e.outUrl);
+  }
+  state.files = [];
+  while (fileTableBody.firstChild) fileTableBody.removeChild(fileTableBody.firstChild);
+  fileTableBody.appendChild(emptyRow);
+  emptyRow.style.display = '';
+  updateFileCount();
+  updateBakeBtn();
+  downloadZipBtn.disabled = true;
+  downloadIndivBtn.disabled = true;
+  updateProgress(0, 0, 0, 0);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════
+updateResizeModeUI();
+updateCompressModeUI();
+updateProgress(0, 0, 0, 0);
+</script>
+</body>
+</html>
