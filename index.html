@@ -553,17 +553,17 @@
   <!-- ── Right Panel: Files ── -->
   <main class="right-panel" aria-label="File list">
 
-    <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Drop images or click to pick files">
+    <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Drop images or zip archive, or click to pick files">
       <div class="drop-zone-inner">
         <div class="drop-zone-icon">🖼️</div>
-        <p><strong>Drop images or folders here</strong></p>
-        <p class="hint">or click to browse &nbsp;·&nbsp; JPEG, PNG, WebP, GIF (1st frame), BMP, HEIC</p>
+        <p><strong>Drop images or zip archives here</strong></p>
+        <p class="hint">or click to browse &nbsp;·&nbsp; JPEG, PNG, WebP, BMP, HEIC</p>
       </div>
-      <input type="file" id="fileInput" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif" aria-label="File input">
+      <input type="file" id="fileInput" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.zip" aria-label="File input">
     </div>
 
     <div class="file-controls">
-      <button class="btn-secondary" id="folderPickBtn" style="font-size:0.78rem">📁 Pick folder</button>
+      <button class="btn-secondary" id="folderPickBtn" style="font-size:0.78rem">📁 Pick files</button>
       <input type="file" id="folderInput" webkitdirectory multiple style="display:none" aria-label="Folder input">
       <button class="btn-secondary" id="clearFilesBtn" style="font-size:0.78rem" disabled>✕ Clear all</button>
       <span class="count-badge" id="countBadge">0 files</span>
