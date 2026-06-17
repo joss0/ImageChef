@@ -1908,12 +1908,45 @@ folderInput.addEventListener('change', () => {
   folderInput.value = '';
 });
 
-dropZone.addEventListener('dragenter', e => { e.preventDefault(); dropZone.classList.add('drag-active'); });
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-active'); });
+function isFileDrag(e) {
+  // Recipe op reorders use dataTransfer with no Files — only file system drops have 'Files' type
+  return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files');
+}
+
+async function handleDroppedFiles(fileList) {
+  const all = [...fileList];
+  const zips = all.filter(f => extOf(f.name) === 'zip');
+  const images = all.filter(f => SUPPORTED_EXTS.has(extOf(f.name)));
+  for (const zip of zips) await extractZip(zip);
+  if (images.length) addFiles(images);
+}
+
+async function extractZip(file) {
+  try {
+    const zip = await JSZip.loadAsync(file);
+    const extracted = [];
+    for (const [path, entry] of Object.entries(zip.files)) {
+      if (entry.dir) continue;
+      const ext = extOf(path);
+      if (!SUPPORTED_EXTS.has(ext)) continue;
+      const blob = await entry.async('blob');
+      extracted.push(new File([blob], path.split('/').pop(), { type: blob.type || 'image/' + ext }));
+    }
+    if (extracted.length) addFiles(extracted);
+    else alert('No supported images found in ' + file.name);
+  } catch(e) {
+    console.error('ZIP read failed', e);
+    alert('Failed to read ZIP: ' + e.message);
+  }
+}
+
+dropZone.addEventListener('dragenter', e => { if (!isFileDrag(e)) return; e.preventDefault(); dropZone.classList.add('drag-active'); });
+dropZone.addEventListener('dragover', e => { if (!isFileDrag(e)) return; e.preventDefault(); dropZone.classList.add('drag-active'); });
 dropZone.addEventListener('dragleave', e => {
   if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drag-active');
 });
 dropZone.addEventListener('drop', async e => {
+  if (!isFileDrag(e)) return;
   e.preventDefault();
   dropZone.classList.remove('drag-active');
   const dtItems = [...(e.dataTransfer.items || [])];
@@ -1921,20 +1954,19 @@ dropZone.addEventListener('drop', async e => {
     const allFiles = [];
     for (const item of dtItems) {
       const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
-      if (entry) {
-        const files = await walkEntry(entry);
-        allFiles.push(...files);
-      }
+      if (entry) allFiles.push(...(await walkEntry(entry)));
     }
-    if (allFiles.length) { addFiles(allFiles); return; }
+    if (allFiles.length) { await handleDroppedFiles(allFiles); return; }
   }
-  addFiles(e.dataTransfer.files);
+  await handleDroppedFiles(e.dataTransfer.files);
 });
 
 document.querySelector('.right-panel').addEventListener('dragover', e => {
+  if (!isFileDrag(e)) return;
   if (!e.target.closest('#dropZone')) { e.preventDefault(); dropZone.classList.add('drag-active'); }
 });
-document.querySelector('.right-panel').addEventListener('drop', e => {
+document.querySelector('.right-panel').addEventListener('drop', async e => {
+  if (!isFileDrag(e)) return;
   if (!e.target.closest('#dropZone')) {
     e.preventDefault();
     dropZone.classList.remove('drag-active');
