@@ -824,6 +824,7 @@ const OP_DEFS = {
     name: 'Compress',
     defaultConfig: { mode: 'per', perKB: 500, totalMB: 20 },
     renderUI(config, update) {
+      let cur = config;
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
       div.style.display = 'flex';
@@ -843,8 +844,8 @@ const OP_DEFS = {
           const lbl = document.createElement('label');
           const r = document.createElement('input');
           r.type = 'radio'; r.name = rName; r.value = v;
-          if (v === config.mode) r.checked = true;
-          r.addEventListener('change', () => { update({ ...config, mode: v }); html(); });
+          if (v === cur.mode) r.checked = true;
+          r.addEventListener('change', () => { cur = { ...cur, mode: v }; update(cur); html(); });
           lbl.appendChild(r);
           lbl.appendChild(document.createTextNode(' ' + t));
           radioGroup.appendChild(lbl);
@@ -852,27 +853,27 @@ const OP_DEFS = {
         modeRow.appendChild(modeLabel); modeRow.appendChild(radioGroup);
         div.appendChild(modeRow);
 
-        if (config.mode !== 'total') {
+        if (cur.mode !== 'total') {
           const perRow = document.createElement('div');
           perRow.className = 'field-row';
           const perLabel = document.createElement('label'); perLabel.textContent = 'Max per file';
           const perInput = document.createElement('input');
-          perInput.type = 'number'; perInput.value = config.perKB; perInput.min = 10; perInput.max = 102400;
+          perInput.type = 'number'; perInput.value = cur.perKB; perInput.min = 10; perInput.max = 102400;
           perInput.setAttribute('aria-label', 'Per-file max KB');
-          perInput.addEventListener('change', () => update({ ...config, perKB: parseFloat(perInput.value) || 500 }));
+          perInput.addEventListener('change', () => { cur = { ...cur, perKB: parseFloat(perInput.value) || 500 }; update(cur); });
           const kbSpan = document.createElement('span'); kbSpan.className = 'unit'; kbSpan.textContent = 'KB';
           perRow.appendChild(perLabel); perRow.appendChild(perInput); perRow.appendChild(kbSpan);
           div.appendChild(perRow);
         }
 
-        if (config.mode === 'total') {
+        if (cur.mode === 'total') {
           const totalRow = document.createElement('div');
           totalRow.className = 'field-row';
           const totalLabel = document.createElement('label'); totalLabel.textContent = 'Total budget';
           const totalInput = document.createElement('input');
-          totalInput.type = 'number'; totalInput.value = config.totalMB; totalInput.min = 1; totalInput.max = 10000;
+          totalInput.type = 'number'; totalInput.value = cur.totalMB; totalInput.min = 1; totalInput.max = 10000;
           totalInput.setAttribute('aria-label', 'Total batch MB');
-          totalInput.addEventListener('change', () => update({ ...config, totalMB: parseFloat(totalInput.value) || 20 }));
+          totalInput.addEventListener('change', () => { cur = { ...cur, totalMB: parseFloat(totalInput.value) || 20 }; update(cur); });
           const mbSpan = document.createElement('span'); mbSpan.className = 'unit'; mbSpan.textContent = 'MB';
           totalRow.appendChild(totalLabel); totalRow.appendChild(totalInput); totalRow.appendChild(mbSpan);
           div.appendChild(totalRow);
