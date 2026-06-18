@@ -1895,7 +1895,19 @@ function clampPan() {
   vp.addEventListener('wheel', e => {
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    zoomState.scale = Math.max(1, zoomState.scale * factor);
+    const prevScale = zoomState.scale;
+    const newScale = Math.max(1, prevScale * factor);
+    if (newScale === prevScale) return;
+
+    // Keep the point under the cursor fixed while zooming.
+    const rect = vp.getBoundingClientRect();
+    const mx = e.clientX - (rect.left + rect.width / 2);
+    const my = e.clientY - (rect.top + rect.height / 2);
+    const ratio = newScale / prevScale;
+    zoomState.tx = mx - (mx - zoomState.tx) * ratio;
+    zoomState.ty = my - (my - zoomState.ty) * ratio;
+    zoomState.scale = newScale;
+
     if (zoomState.scale === 1) { zoomState.tx = 0; zoomState.ty = 0; }
     else clampPan();
     applyZoomTransform();
