@@ -508,6 +508,11 @@
         <button class="btn-primary" id="bakeBtn" style="flex:1" disabled>🍳 Bake!</button>
         <button class="btn-success" id="downloadZipBtn" disabled>⬇ ZIP</button>
       </div>
+      <div class="field-row" style="gap:4px">
+        <label style="font-size:0.72rem;color:var(--text-dim);white-space:nowrap">ZIP name</label>
+        <input type="text" id="zipNameInput" value="imagechef_{date}" style="flex:1;font-size:0.72rem" aria-label="ZIP filename pattern">
+      </div>
+      <div class="notice" style="font-size:0.65rem;padding:3px 8px">Tokens: {date}</div>
       <button class="btn-secondary" id="downloadIndivBtn" disabled style="font-size:0.78rem">⬇ Download individually</button>
     </div>
   </aside>
@@ -1832,7 +1837,14 @@ async function downloadZip() {
       zip.file(name, entry.outBlob, { compression: 'STORE' });
     }
     const zipBlob = await zip.generateAsync({ type: 'blob' });
-    triggerDownload(zipBlob, 'imagechef-output.zip');
+    const today = new Date();
+    const dateStr = today.getFullYear()
+      + '-' + String(today.getMonth() + 1).padStart(2, '0')
+      + '-' + String(today.getDate()).padStart(2, '0');
+    const rawName = (document.getElementById('zipNameInput').value.trim() || 'imagechef_{date}')
+      .replace(/{date}/g, dateStr);
+    const zipName = rawName.endsWith('.zip') ? rawName : rawName + '.zip';
+    triggerDownload(zipBlob, zipName);
   } catch (e) {
     console.error('ZIP failed', e);
     alert('ZIP creation failed: ' + e.message);
