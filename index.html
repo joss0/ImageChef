@@ -1188,15 +1188,23 @@ const state = {
 // Recipe serialization (URL hash)
 // ═══════════════════════════════════════════════════════════════
 function saveRecipeToHash() {
-  const serializable = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
-  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(serializable)));
+  const recipe = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
+  const zipName = (document.getElementById('zipNameInput')?.value || '').trim();
+  const payload = { recipe, zip: zipName };
+  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(payload)));
 }
 
 function loadRecipeFromHash() {
   const m = location.hash.match(/^#r=(.+)/);
   if (!m) return false;
   try {
-    const steps = JSON.parse(atob(m[1]));
+    const parsed = JSON.parse(atob(m[1]));
+    // Backward compat: old format was a bare array of steps.
+    const steps = Array.isArray(parsed) ? parsed : parsed.recipe;
+    if (!Array.isArray(parsed) && typeof parsed.zip === 'string' && parsed.zip) {
+      const zi = document.getElementById('zipNameInput');
+      if (zi) zi.value = parsed.zip;
+    }
     state.recipe = steps
       .filter(s => OP_DEFS[s.op])
       .map(s => ({
@@ -2097,6 +2105,8 @@ document.querySelector('.right-panel').addEventListener('drop', async e => {
 bakeBtn.addEventListener('click', bake);
 downloadZipBtn.addEventListener('click', downloadZip);
 downloadIndivBtn.addEventListener('click', downloadIndividually);
+
+document.getElementById('zipNameInput').addEventListener('change', saveRecipeToHash);
 
 clearFilesBtn.addEventListener('click', () => {
   for (const e of state.files) {
