@@ -444,6 +444,11 @@
   .preview-zoom-hint {
     font-size: 0.65rem; color: var(--text-dim);
   }
+  .preview-zoom-level {
+    font-size: 0.7rem; color: var(--text);
+    font-variant-numeric: tabular-nums;
+    min-width: 3.2em; text-align: right;
+  }
   .preview-zoom-reset {
     font-size: 0.65rem; padding: 1px 7px;
     background: var(--surface2); border: 1px solid var(--border);
@@ -569,7 +574,8 @@
       <h2 id="previewTitle">Before / After</h2>
       <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
         <span class="preview-zoom-hint">Scroll to zoom · drag to pan</span>
-        <button class="preview-zoom-reset" id="previewZoomReset">Reset zoom</button>
+        <span class="preview-zoom-level" id="previewZoomLevel">100%</span>
+        <button class="preview-zoom-reset" id="previewZoomReset">Reset</button>
       </div>
       <button class="modal-close" id="previewClose" aria-label="Close preview">✕</button>
     </div>
@@ -1865,6 +1871,7 @@ function applyZoomTransform() {
   const t = `translate(${zoomState.tx}px, ${zoomState.ty}px) scale(${zoomState.scale})`;
   zoomInnerBefore.style.transform = t;
   zoomInnerAfter.style.transform = t;
+  previewZoomLevel.textContent = Math.round(zoomState.scale * 100) + '%';
   previewZoomReset.style.display = zoomState.scale !== 1 || zoomState.tx !== 0 || zoomState.ty !== 0 ? 'inline-block' : 'none';
 }
 
@@ -1874,16 +1881,21 @@ function resetZoom() {
 }
 
 function clampPan() {
-  const maxPan = Math.max(0, (zoomState.scale - 1) * 200);
-  zoomState.tx = Math.max(-maxPan, Math.min(maxPan, zoomState.tx));
-  zoomState.ty = Math.max(-maxPan, Math.min(maxPan, zoomState.ty));
+  // Allow panning until any corner of the (larger) image reaches the centre
+  // of the viewport: max offset = half the scaled rendered image dimension.
+  const renderedW = Math.max(previewBefore.clientWidth, previewAfter.clientWidth);
+  const renderedH = Math.max(previewBefore.clientHeight, previewAfter.clientHeight);
+  const maxPanX = (renderedW * zoomState.scale) / 2;
+  const maxPanY = (renderedH * zoomState.scale) / 2;
+  zoomState.tx = Math.max(-maxPanX, Math.min(maxPanX, zoomState.tx));
+  zoomState.ty = Math.max(-maxPanY, Math.min(maxPanY, zoomState.ty));
 }
 
 [zoomViewportBefore, zoomViewportAfter].forEach(vp => {
   vp.addEventListener('wheel', e => {
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    zoomState.scale = Math.min(12, Math.max(1, zoomState.scale * factor));
+    zoomState.scale = Math.max(1, zoomState.scale * factor);
     if (zoomState.scale === 1) { zoomState.tx = 0; zoomState.ty = 0; }
     else clampPan();
     applyZoomTransform();
