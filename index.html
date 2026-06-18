@@ -412,15 +412,50 @@
   .preview-pair {
     display: flex; gap: 16px; align-items: flex-start;
   }
-  .preview-half { flex: 1; text-align: center; }
+  .preview-half { flex: 1; text-align: center; min-width: 0; }
   .preview-half label {
     display: block; margin-bottom: 6px;
     font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase;
   }
+  .preview-zoom-viewport {
+    overflow: hidden;
+    border: 1px solid var(--border); border-radius: 4px;
+    cursor: grab;
+    user-select: none;
+    position: relative;
+    height: 60vh;
+    background: var(--surface2);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .preview-zoom-viewport.panning { cursor: grabbing; }
+  .preview-zoom-inner {
+    transform-origin: center center;
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+  }
   .preview-half img {
     max-width: 100%; max-height: 60vh;
-    border: 1px solid var(--border); border-radius: 4px;
+    display: block; pointer-events: none;
   }
+  .preview-zoom-controls {
+    display: flex; align-items: center; gap: 6px;
+    margin-bottom: 6px; justify-content: center;
+  }
+  .preview-zoom-hint {
+    font-size: 0.65rem; color: var(--text-dim);
+  }
+  .preview-zoom-level {
+    font-size: 0.7rem; color: var(--text);
+    font-variant-numeric: tabular-nums;
+    min-width: 3.2em; text-align: right;
+  }
+  .preview-zoom-reset {
+    font-size: 0.65rem; padding: 1px 7px;
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text-dim); border-radius: 3px; cursor: pointer;
+    display: none;
+  }
+  .preview-zoom-reset:hover { color: var(--text); }
   .preview-meta {
     margin-top: 8px;
     font-size: 0.72rem;
@@ -473,6 +508,11 @@
         <button class="btn-primary" id="bakeBtn" style="flex:1" disabled>🍳 Bake!</button>
         <button class="btn-success" id="downloadZipBtn" disabled>⬇ ZIP</button>
       </div>
+      <div class="field-row" style="gap:4px">
+        <label style="font-size:0.72rem;color:var(--text-dim);white-space:nowrap">ZIP name</label>
+        <input type="text" id="zipNameInput" value="imagechef_{date}" style="flex:1;font-size:0.72rem" aria-label="ZIP filename pattern">
+      </div>
+      <div class="notice" style="font-size:0.65rem;padding:3px 8px">Tokens: {date}</div>
       <button class="btn-secondary" id="downloadIndivBtn" disabled style="font-size:0.78rem">⬇ Download individually</button>
     </div>
   </aside>
@@ -537,17 +577,30 @@
   <div class="modal">
     <div class="modal-header">
       <h2 id="previewTitle">Before / After</h2>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <span class="preview-zoom-hint">Scroll to zoom · drag to pan</span>
+        <span class="preview-zoom-level" id="previewZoomLevel">100%</span>
+        <button class="preview-zoom-reset" id="previewZoomReset">Reset</button>
+      </div>
       <button class="modal-close" id="previewClose" aria-label="Close preview">✕</button>
     </div>
     <div class="preview-pair">
       <div class="preview-half">
         <label>Before</label>
-        <img id="previewBefore" src="" alt="Original image">
+        <div class="preview-zoom-viewport" id="zoomViewportBefore">
+          <div class="preview-zoom-inner" id="zoomInnerBefore">
+            <img id="previewBefore" src="" alt="Original image">
+          </div>
+        </div>
         <div class="preview-meta" id="previewBeforeMeta"></div>
       </div>
       <div class="preview-half">
         <label>After</label>
-        <img id="previewAfter" src="" alt="Processed image">
+        <div class="preview-zoom-viewport" id="zoomViewportAfter">
+          <div class="preview-zoom-inner" id="zoomInnerAfter">
+            <img id="previewAfter" src="" alt="Processed image">
+          </div>
+        </div>
         <div class="preview-meta" id="previewAfterMeta"></div>
       </div>
     </div>
@@ -692,7 +745,7 @@ const OP_DEFS = {
 
   resize: {
     name: 'Resize',
-    defaultConfig: { mode: 'fit', w: 1920, h: 1080, percent: 75, longest: 1600, neverUpscale: true },
+    defaultConfig: { mode: 'fit', w: 1920, h: 1080, percent: 75, longest: 1600 },
     renderUI(config, update) {
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
@@ -767,19 +820,6 @@ const OP_DEFS = {
           div.appendChild(longRow);
         }
 
-        const upscaleRow = document.createElement('div');
-        upscaleRow.className = 'field-row';
-        const upscaleEmptyLabel = document.createElement('label');
-        const upscaleLabel = document.createElement('label');
-        upscaleLabel.style.cssText = 'min-width:unset;display:flex;gap:4px;align-items:center;cursor:pointer';
-        const upscaleCb = document.createElement('input');
-        upscaleCb.type = 'checkbox'; upscaleCb.checked = config.neverUpscale;
-        upscaleCb.addEventListener('change', () => update({ ...config, neverUpscale: upscaleCb.checked }));
-        upscaleLabel.appendChild(upscaleCb);
-        upscaleLabel.appendChild(document.createTextNode(' Never upscale'));
-        upscaleRow.appendChild(upscaleEmptyLabel);
-        upscaleRow.appendChild(upscaleLabel);
-        div.appendChild(upscaleRow);
       }
 
       html();
@@ -788,24 +828,19 @@ const OP_DEFS = {
     async apply(canvas, meta, config) {
       const srcW = canvas.width, srcH = canvas.height;
       let tw, th;
-      const { mode, neverUpscale } = config;
+      const { mode } = config;
 
       if (mode === 'fit' || mode === 'exact') {
         const scale = Math.min(config.w / srcW, config.h / srcH);
-        if (neverUpscale && scale > 1) { tw = srcW; th = srcH; }
-        else { tw = Math.round(srcW * scale); th = Math.round(srcH * scale); }
+        tw = Math.round(srcW * scale); th = Math.round(srcH * scale);
       } else if (mode === 'percent') {
         const s = config.percent / 100;
-        if (neverUpscale && s > 1) { tw = srcW; th = srcH; }
-        else { tw = Math.round(srcW * s); th = Math.round(srcH * s); }
+        tw = Math.round(srcW * s); th = Math.round(srcH * s);
       } else if (mode === 'longest') {
         const longest = Math.max(srcW, srcH);
-        if (neverUpscale && config.longest >= longest) { tw = srcW; th = srcH; }
-        else {
-          const scale = config.longest / longest;
-          tw = Math.round(srcW * scale);
-          th = Math.round(srcH * scale);
-        }
+        const scale = config.longest / longest;
+        tw = Math.round(srcW * scale);
+        th = Math.round(srcH * scale);
       } else {
         tw = srcW; th = srcH;
       }
@@ -1153,15 +1188,23 @@ const state = {
 // Recipe serialization (URL hash)
 // ═══════════════════════════════════════════════════════════════
 function saveRecipeToHash() {
-  const serializable = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
-  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(serializable)));
+  const recipe = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
+  const zipName = (document.getElementById('zipNameInput')?.value || '').trim();
+  const payload = { recipe, zip: zipName };
+  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(payload)));
 }
 
 function loadRecipeFromHash() {
   const m = location.hash.match(/^#r=(.+)/);
   if (!m) return false;
   try {
-    const steps = JSON.parse(atob(m[1]));
+    const parsed = JSON.parse(atob(m[1]));
+    // Backward compat: old format was a bare array of steps.
+    const steps = Array.isArray(parsed) ? parsed : parsed.recipe;
+    if (!Array.isArray(parsed) && typeof parsed.zip === 'string' && parsed.zip) {
+      const zi = document.getElementById('zipNameInput');
+      if (zi) zi.value = parsed.zip;
+    }
     state.recipe = steps
       .filter(s => OP_DEFS[s.op])
       .map(s => ({
@@ -1802,7 +1845,14 @@ async function downloadZip() {
       zip.file(name, entry.outBlob, { compression: 'STORE' });
     }
     const zipBlob = await zip.generateAsync({ type: 'blob' });
-    triggerDownload(zipBlob, 'imagechef-output.zip');
+    const today = new Date();
+    const dateStr = today.getFullYear()
+      + '-' + String(today.getMonth() + 1).padStart(2, '0')
+      + '-' + String(today.getDate()).padStart(2, '0');
+    const rawName = (document.getElementById('zipNameInput').value.trim() || 'imagechef_{date}')
+      .replace(/{date}/g, dateStr);
+    const zipName = rawName.endsWith('.zip') ? rawName : rawName + '.zip';
+    triggerDownload(zipBlob, zipName);
   } catch (e) {
     console.error('ZIP failed', e);
     alert('ZIP creation failed: ' + e.message);
@@ -1832,10 +1882,87 @@ function triggerDownload(blob, filename) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Preview modal
+// Preview modal — zoom/pan
 // ═══════════════════════════════════════════════════════════════
+const zoomState = { scale: 1, tx: 0, ty: 0 };
+let panActive = false, panLastX = 0, panLastY = 0;
+
+function applyZoomTransform() {
+  const t = `translate(${zoomState.tx}px, ${zoomState.ty}px) scale(${zoomState.scale})`;
+  zoomInnerBefore.style.transform = t;
+  zoomInnerAfter.style.transform = t;
+  previewZoomLevel.textContent = Math.round(zoomState.scale * 100) + '%';
+  previewZoomReset.style.display = zoomState.scale !== 1 || zoomState.tx !== 0 || zoomState.ty !== 0 ? 'inline-block' : 'none';
+}
+
+function resetZoom() {
+  zoomState.scale = 1; zoomState.tx = 0; zoomState.ty = 0;
+  applyZoomTransform();
+}
+
+function clampPan() {
+  // Allow panning until any corner of the (larger) image reaches the centre
+  // of the viewport: max offset = half the scaled rendered image dimension.
+  const renderedW = Math.max(previewBefore.clientWidth, previewAfter.clientWidth);
+  const renderedH = Math.max(previewBefore.clientHeight, previewAfter.clientHeight);
+  const maxPanX = (renderedW * zoomState.scale) / 2;
+  const maxPanY = (renderedH * zoomState.scale) / 2;
+  zoomState.tx = Math.max(-maxPanX, Math.min(maxPanX, zoomState.tx));
+  zoomState.ty = Math.max(-maxPanY, Math.min(maxPanY, zoomState.ty));
+}
+
+[zoomViewportBefore, zoomViewportAfter].forEach(vp => {
+  vp.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const prevScale = zoomState.scale;
+    const newScale = Math.max(1, prevScale * factor);
+    if (newScale === prevScale) return;
+
+    // Keep the point under the cursor fixed while zooming.
+    const rect = vp.getBoundingClientRect();
+    const mx = e.clientX - (rect.left + rect.width / 2);
+    const my = e.clientY - (rect.top + rect.height / 2);
+    const ratio = newScale / prevScale;
+    zoomState.tx = mx - (mx - zoomState.tx) * ratio;
+    zoomState.ty = my - (my - zoomState.ty) * ratio;
+    zoomState.scale = newScale;
+
+    if (zoomState.scale === 1) { zoomState.tx = 0; zoomState.ty = 0; }
+    else clampPan();
+    applyZoomTransform();
+  }, { passive: false });
+
+  vp.addEventListener('mousedown', e => {
+    if (zoomState.scale <= 1) return;
+    panActive = true; panLastX = e.clientX; panLastY = e.clientY;
+    zoomViewportBefore.classList.add('panning');
+    zoomViewportAfter.classList.add('panning');
+    e.preventDefault();
+  });
+});
+
+document.addEventListener('mousemove', e => {
+  if (!panActive) return;
+  zoomState.tx += e.clientX - panLastX;
+  zoomState.ty += e.clientY - panLastY;
+  panLastX = e.clientX; panLastY = e.clientY;
+  clampPan();
+  applyZoomTransform();
+});
+
+document.addEventListener('mouseup', () => {
+  if (!panActive) return;
+  panActive = false;
+  zoomViewportBefore.classList.remove('panning');
+  zoomViewportAfter.classList.remove('panning');
+});
+
+previewZoomReset.addEventListener('click', resetZoom);
+
 function openPreview(entry) {
   if (!entry.origUrl) return;
+  resetZoom();
   previewTitle.textContent = escHtml(entry.outName || entry.name);
   previewBefore.src = entry.origUrl;
   previewBeforeMeta.textContent = fmtBytes(entry.origSize) + (entry.dims ? ' · ' + entry.dims.w + '×' + entry.dims.h : '');
@@ -1865,9 +1992,9 @@ emailPresetBtn.addEventListener('click', () => {
 
   if (resizeIdx >= 0) {
     state.recipe[resizeIdx].enabled = true;
-    state.recipe[resizeIdx].config = { ...state.recipe[resizeIdx].config, mode: 'longest', longest: 1600, neverUpscale: true };
+    state.recipe[resizeIdx].config = { ...state.recipe[resizeIdx].config, mode: 'longest', longest: 1600 };
   } else {
-    state.recipe.push({ uid: uid(), op: 'resize', enabled: true, config: { ...OP_DEFS.resize.defaultConfig, mode: 'longest', longest: 1600, neverUpscale: true } });
+    state.recipe.push({ uid: uid(), op: 'resize', enabled: true, config: { ...OP_DEFS.resize.defaultConfig, mode: 'longest', longest: 1600 } });
   }
 
   if (compressIdx >= 0) {
@@ -1978,6 +2105,8 @@ document.querySelector('.right-panel').addEventListener('drop', async e => {
 bakeBtn.addEventListener('click', bake);
 downloadZipBtn.addEventListener('click', downloadZip);
 downloadIndivBtn.addEventListener('click', downloadIndividually);
+
+document.getElementById('zipNameInput').addEventListener('change', saveRecipeToHash);
 
 clearFilesBtn.addEventListener('click', () => {
   for (const e of state.files) {
