@@ -6,14 +6,16 @@
 <title>ImageChef</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
-  // Set theme before first paint to avoid a flash of the wrong theme.
+  // Resolve the saved theme preference before first paint to avoid a flash of
+  // the wrong theme. A 'light'/'dark' preference is used as-is; anything else
+  // (including the default "system") follows the OS color-scheme setting.
   (function () {
     try {
-      var t = localStorage.getItem('imagechef-theme');
-      if (t !== 'light' && t !== 'dark') {
-        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
-      }
-      document.documentElement.setAttribute('data-theme', t);
+      var pref = localStorage.getItem('imagechef-theme');
+      var resolved = (pref === 'light' || pref === 'dark')
+        ? pref
+        : ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', resolved);
     } catch (e) {
       document.documentElement.setAttribute('data-theme', 'dark');
     }
@@ -91,6 +93,17 @@
     color: var(--text-dim);
     font-size: 0.8rem;
   }
+  .theme-select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    font-family: var(--font);
+    cursor: pointer;
+  }
+  .theme-select:focus { outline: none; border-color: var(--accent2); }
   .main-layout {
     display: flex;
     flex: 1;
@@ -527,7 +540,11 @@
 <header>
   <h1>🍳 ImageChef</h1>
   <span class="tagline">Client-side image batch processor — nothing leaves your browser</span>
-  <button class="btn-secondary" id="themeToggle" style="margin-left:auto;padding:6px 10px;font-size:1rem;line-height:1" aria-label="Toggle light and dark theme" title="Toggle theme">🌙</button>
+  <select class="theme-select" id="themeSelect" style="margin-left:auto" aria-label="Color theme" title="Color theme">
+    <option value="system">🖥️ System</option>
+    <option value="light">☀️ Light</option>
+    <option value="dark">🌙 Dark</option>
+  </select>
 </header>
 
 <div class="main-layout">
@@ -2215,29 +2232,43 @@ clearFilesBtn.addEventListener('click', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Theme toggle (light / dark)
+// Theme: System (default) / Light / Dark
 // ═══════════════════════════════════════════════════════════════
 const THEME_KEY = 'imagechef-theme';
-const themeToggle = document.getElementById('themeToggle');
+const THEME_PREFS = ['system', 'light', 'dark'];
+const themeSelect = document.getElementById('themeSelect');
+const darkMql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
-function currentTheme() {
-  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+function getThemePref() {
+  let p = null;
+  try { p = localStorage.getItem(THEME_KEY); } catch (e) { /* ignore */ }
+  return THEME_PREFS.includes(p) ? p : 'system';
 }
 
-function applyTheme(theme) {
-  document.documentElement.setAttribute('data-theme', theme);
-  themeToggle.textContent = theme === 'light' ? '☀️' : '🌙';
-  themeToggle.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
+function resolveTheme(pref) {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return darkMql && darkMql.matches ? 'dark' : 'light';   // system → follow OS
 }
 
-themeToggle.addEventListener('click', () => {
-  const next = currentTheme() === 'light' ? 'dark' : 'light';
-  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* ignore */ }
-  applyTheme(next);
+function applyThemePref(pref) {
+  document.documentElement.setAttribute('data-theme', resolveTheme(pref));
+}
+
+themeSelect.value = getThemePref();
+applyThemePref(themeSelect.value);
+
+themeSelect.addEventListener('change', () => {
+  const pref = themeSelect.value;
+  try { localStorage.setItem(THEME_KEY, pref); } catch (e) { /* ignore */ }
+  applyThemePref(pref);
 });
 
-// Sync the icon with the theme already set by the inline head script.
-applyTheme(currentTheme());
+// Live-track the OS setting while in "system" mode.
+if (darkMql) {
+  darkMql.addEventListener('change', () => {
+    if (getThemePref() === 'system') applyThemePref('system');
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Init
