@@ -38,7 +38,7 @@ Drop `index.html` anywhere that serves static files:
 
 - **Cloudflare Pages** — push to a repo, done
 - **Any static host** — single file, no dependencies to install
-- **Locally** — open the file directly in a browser (`file://` works for everything except folder drag-and-drop, which requires a server origin in some browsers)
+- **Locally** — open the file directly in a browser (`file://` works for everything except folder drag-and-drop, and OS detecting darkmode, which requires a server origin in some browsers)
 
 ## Browser support
 
