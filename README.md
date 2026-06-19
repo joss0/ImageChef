@@ -13,6 +13,8 @@ ImageChef is a single-page tool for batch-processing images entirely in your bro
 - **Rename** — pattern-based rename with `{name}`, `{index}`, `{width}x{height}`, `{date}` tokens
 - **Email preset** — one click to configure longest-edge 1600 px + total budget 20 MB + JPEG output
 - **Before/after preview** — side-by-side comparison with synchronized zoom (scroll) and pan (drag) so you can inspect compression artifacts up close
+- **Light & dark themes** — System / Light / Dark selector in the header, defaulting to System, which follows your OS color-scheme setting and updates live when it changes; an explicit choice is remembered across visits
+- **Recipe sharing via URL hash** — the recipe, ZIP name, and rename pattern are stored in the URL hash, so bookmarking or sharing the link restores your setup
 
 ## Usage
 
@@ -44,4 +46,4 @@ Any modern browser with `createImageBitmap` and `OffscreenCanvas` support (Chrom
 
 ## Roadmap
 
-Crop/pad to aspect ratio · watermark overlay · rotate/flip · AVIF output · recipe sharing via URL hash · PWA/offline mode
+Crop/pad to aspect ratio · watermark overlay · AVIF output · PWA/offline mode

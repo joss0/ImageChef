@@ -5,8 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ImageChef</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+  // Resolve the saved theme preference before first paint to avoid a flash of
+  // the wrong theme. A 'light'/'dark' preference is used as-is; anything else
+  // (including the default "system") follows the OS color-scheme setting.
+  (function () {
+    try {
+      var pref = localStorage.getItem('imagechef-theme');
+      var resolved = (pref === 'light' || pref === 'dark')
+        ? pref
+        : ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', resolved);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+</script>
 <style>
-  :root {
+  :root, [data-theme="dark"] {
     --bg: #1a1a2e;
     --panel: #16213e;
     --surface: #0f3460;
@@ -16,11 +32,35 @@
     --text: #e0e0e0;
     --text-dim: #8888aa;
     --border: #2a2a5a;
+    --hover: #1f3060;
+    --toggle-off: #444;
+    --scroll-thumb-hover: #44446a;
+    --status-done-fg: #80e080;
+    --status-failed-fg: #f88;
     --success: #4caf50;
     --warning: #ff9800;
     --error: #f44336;
     --radius: 6px;
     --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  [data-theme="light"] {
+    --bg: #f4f5fa;
+    --panel: #ffffff;
+    --surface: #e8ebf5;
+    --surface2: #eef0f8;
+    --accent: #e23b58;
+    --accent2: #0c8576;
+    --text: #1c1c2e;
+    --text-dim: #6b6b85;
+    --border: #d4d8e8;
+    --hover: #dde2f0;
+    --toggle-off: #c2c5d6;
+    --scroll-thumb-hover: #b4b9cf;
+    --status-done-fg: #2e7d32;
+    --status-failed-fg: #c62828;
+    --success: #2e7d32;
+    --warning: #e07b00;
+    --error: #c62828;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -31,6 +71,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: background-color 0.2s, color 0.2s;
   }
   header {
     background: var(--panel);
@@ -52,6 +93,17 @@
     color: var(--text-dim);
     font-size: 0.8rem;
   }
+  .theme-select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    font-family: var(--font);
+    cursor: pointer;
+  }
+  .theme-select:focus { outline: none; border-color: var(--accent2); }
   .main-layout {
     display: flex;
     flex: 1;
@@ -106,10 +158,10 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
-  .recipe-op-header:hover { background: #1f3060; }
+  .recipe-op-header:hover { background: var(--hover); }
   .op-toggle {
     width: 32px; height: 18px;
-    background: #444; border-radius: 9px;
+    background: var(--toggle-off); border-radius: 9px;
     position: relative; cursor: pointer;
     border: none; flex-shrink: 0;
     transition: background 0.2s;
@@ -346,8 +398,8 @@
   }
   .status-queued { background: var(--surface); color: var(--text-dim); }
   .status-processing { background: rgba(15,155,142,0.3); color: var(--accent2); }
-  .status-done { background: rgba(76,175,80,0.25); color: #80e080; }
-  .status-failed { background: rgba(244,67,54,0.25); color: #f88; }
+  .status-done { background: rgba(76,175,80,0.25); color: var(--status-done-fg); }
+  .status-failed { background: rgba(244,67,54,0.25); color: var(--status-failed-fg); }
   .savings { color: var(--accent2); font-weight: 600; }
   .savings.negative { color: var(--warning); }
   /* ── Progress Bar ── */
@@ -466,7 +518,7 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #44446a; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
   /* ── Notice ── */
   .notice {
     font-size: 0.72rem;
@@ -488,6 +540,11 @@
 <header>
   <h1>🍳 ImageChef</h1>
   <span class="tagline">Client-side image batch processor — nothing leaves your browser</span>
+  <select class="theme-select" id="themeSelect" style="margin-left:auto" aria-label="Color theme" title="Color theme">
+    <option value="system">🖥️ System</option>
+    <option value="light">☀️ Light</option>
+    <option value="dark">🌙 Dark</option>
+  </select>
 </header>
 
 <div class="main-layout">
@@ -635,6 +692,41 @@ function escHtml(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Characters that are illegal or non-portable in filenames across Windows,
+// macOS and Linux. Tokens like {name} keep working — { } are allowed.
+const ILLEGAL_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
+
+function sanitizeFilenameField(s) {
+  return String(s).replace(ILLEGAL_FILENAME_CHARS, '');
+}
+
+// Strip unsafe characters as the user types, preserving caret position.
+function attachFilenameSanitizer(input) {
+  input.addEventListener('input', () => {
+    const clean = sanitizeFilenameField(input.value);
+    if (clean === input.value) return;
+    const removed = input.value.length - clean.length;
+    const pos = Math.max(0, (input.selectionStart || clean.length) - removed);
+    input.value = clean;
+    try { input.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+  });
+}
+
+// Unicode-safe base64 so non-ASCII (but filesystem-valid) text round-trips.
+// Pure-ASCII payloads decode identically to atob(), keeping old hashes valid.
+function b64encodeUnicode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function b64decodeUnicode(str) {
+  const bin = atob(str);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }
 
 const SUPPORTED_EXTS = new Set(['jpg','jpeg','png','webp','gif','bmp','heic','heif']);
@@ -1018,7 +1110,8 @@ const OP_DEFS = {
       const input = document.createElement('input');
       input.type = 'text'; input.value = config.pattern; input.style.width = '150px';
       input.setAttribute('aria-label', 'Rename pattern');
-      input.addEventListener('change', () => update({ ...config, pattern: input.value || '{name}' }));
+      attachFilenameSanitizer(input);
+      input.addEventListener('change', () => update({ ...config, pattern: sanitizeFilenameField(input.value) || '{name}' }));
       row.appendChild(label); row.appendChild(input);
       div.appendChild(row);
 
@@ -1190,15 +1283,21 @@ const state = {
 function saveRecipeToHash() {
   const recipe = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
   const zipName = (document.getElementById('zipNameInput')?.value || '').trim();
+  const renameStep = state.recipe.find(s => s.op === 'rename');
   const payload = { recipe, zip: zipName };
-  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(payload)));
+  // Surface the rename pattern as a top-level field so it's explicit and
+  // shareable in the URL hash (alongside the zip name).
+  if (renameStep && renameStep.config && renameStep.config.pattern) {
+    payload.rename = renameStep.config.pattern;
+  }
+  history.replaceState(null, '', '#r=' + b64encodeUnicode(JSON.stringify(payload)));
 }
 
 function loadRecipeFromHash() {
   const m = location.hash.match(/^#r=(.+)/);
   if (!m) return false;
   try {
-    const parsed = JSON.parse(atob(m[1]));
+    const parsed = JSON.parse(b64decodeUnicode(m[1]));
     // Backward compat: old format was a bare array of steps.
     const steps = Array.isArray(parsed) ? parsed : parsed.recipe;
     if (!Array.isArray(parsed) && typeof parsed.zip === 'string' && parsed.zip) {
@@ -1213,6 +1312,12 @@ function loadRecipeFromHash() {
         enabled: s.enabled !== false,
         config: { ...OP_DEFS[s.op].defaultConfig, ...s.config }
       }));
+    // A top-level rename pattern in the hash takes precedence, so it can be
+    // set or shared directly via the URL.
+    if (!Array.isArray(parsed) && typeof parsed.rename === 'string' && parsed.rename) {
+      const renameStep = state.recipe.find(s => s.op === 'rename');
+      if (renameStep) renameStep.config = { ...renameStep.config, pattern: parsed.rename };
+    }
     return true;
   } catch { return false; }
 }
@@ -2106,7 +2211,9 @@ bakeBtn.addEventListener('click', bake);
 downloadZipBtn.addEventListener('click', downloadZip);
 downloadIndivBtn.addEventListener('click', downloadIndividually);
 
-document.getElementById('zipNameInput').addEventListener('change', saveRecipeToHash);
+const zipNameInput = document.getElementById('zipNameInput');
+attachFilenameSanitizer(zipNameInput);
+zipNameInput.addEventListener('change', saveRecipeToHash);
 
 clearFilesBtn.addEventListener('click', () => {
   for (const e of state.files) {
@@ -2123,6 +2230,45 @@ clearFilesBtn.addEventListener('click', () => {
   downloadIndivBtn.disabled = true;
   updateProgress(0, 0, 0, 0);
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Theme: System (default) / Light / Dark
+// ═══════════════════════════════════════════════════════════════
+const THEME_KEY = 'imagechef-theme';
+const THEME_PREFS = ['system', 'light', 'dark'];
+const themeSelect = document.getElementById('themeSelect');
+const darkMql = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+function getThemePref() {
+  let p = null;
+  try { p = localStorage.getItem(THEME_KEY); } catch (e) { /* ignore */ }
+  return THEME_PREFS.includes(p) ? p : 'system';
+}
+
+function resolveTheme(pref) {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return darkMql && darkMql.matches ? 'dark' : 'light';   // system → follow OS
+}
+
+function applyThemePref(pref) {
+  document.documentElement.setAttribute('data-theme', resolveTheme(pref));
+}
+
+themeSelect.value = getThemePref();
+applyThemePref(themeSelect.value);
+
+themeSelect.addEventListener('change', () => {
+  const pref = themeSelect.value;
+  try { localStorage.setItem(THEME_KEY, pref); } catch (e) { /* ignore */ }
+  applyThemePref(pref);
+});
+
+// Live-track the OS setting while in "system" mode.
+if (darkMql) {
+  darkMql.addEventListener('change', () => {
+    if (getThemePref() === 'system') applyThemePref('system');
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Init
