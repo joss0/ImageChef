@@ -5,8 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ImageChef</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+  // Set theme before first paint to avoid a flash of the wrong theme.
+  (function () {
+    try {
+      var t = localStorage.getItem('imagechef-theme');
+      if (t !== 'light' && t !== 'dark') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+</script>
 <style>
-  :root {
+  :root, [data-theme="dark"] {
     --bg: #1a1a2e;
     --panel: #16213e;
     --surface: #0f3460;
@@ -16,11 +30,35 @@
     --text: #e0e0e0;
     --text-dim: #8888aa;
     --border: #2a2a5a;
+    --hover: #1f3060;
+    --toggle-off: #444;
+    --scroll-thumb-hover: #44446a;
+    --status-done-fg: #80e080;
+    --status-failed-fg: #f88;
     --success: #4caf50;
     --warning: #ff9800;
     --error: #f44336;
     --radius: 6px;
     --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  [data-theme="light"] {
+    --bg: #f4f5fa;
+    --panel: #ffffff;
+    --surface: #e8ebf5;
+    --surface2: #eef0f8;
+    --accent: #e23b58;
+    --accent2: #0c8576;
+    --text: #1c1c2e;
+    --text-dim: #6b6b85;
+    --border: #d4d8e8;
+    --hover: #dde2f0;
+    --toggle-off: #c2c5d6;
+    --scroll-thumb-hover: #b4b9cf;
+    --status-done-fg: #2e7d32;
+    --status-failed-fg: #c62828;
+    --success: #2e7d32;
+    --warning: #e07b00;
+    --error: #c62828;
   }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -31,6 +69,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: background-color 0.2s, color 0.2s;
   }
   header {
     background: var(--panel);
@@ -106,10 +145,10 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
-  .recipe-op-header:hover { background: #1f3060; }
+  .recipe-op-header:hover { background: var(--hover); }
   .op-toggle {
     width: 32px; height: 18px;
-    background: #444; border-radius: 9px;
+    background: var(--toggle-off); border-radius: 9px;
     position: relative; cursor: pointer;
     border: none; flex-shrink: 0;
     transition: background 0.2s;
@@ -346,8 +385,8 @@
   }
   .status-queued { background: var(--surface); color: var(--text-dim); }
   .status-processing { background: rgba(15,155,142,0.3); color: var(--accent2); }
-  .status-done { background: rgba(76,175,80,0.25); color: #80e080; }
-  .status-failed { background: rgba(244,67,54,0.25); color: #f88; }
+  .status-done { background: rgba(76,175,80,0.25); color: var(--status-done-fg); }
+  .status-failed { background: rgba(244,67,54,0.25); color: var(--status-failed-fg); }
   .savings { color: var(--accent2); font-weight: 600; }
   .savings.negative { color: var(--warning); }
   /* ── Progress Bar ── */
@@ -466,7 +505,7 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: #44446a; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
   /* ── Notice ── */
   .notice {
     font-size: 0.72rem;
@@ -488,6 +527,7 @@
 <header>
   <h1>🍳 ImageChef</h1>
   <span class="tagline">Client-side image batch processor — nothing leaves your browser</span>
+  <button class="btn-secondary" id="themeToggle" style="margin-left:auto;padding:6px 10px;font-size:1rem;line-height:1" aria-label="Toggle light and dark theme" title="Toggle theme">🌙</button>
 </header>
 
 <div class="main-layout">
@@ -1190,7 +1230,13 @@ const state = {
 function saveRecipeToHash() {
   const recipe = state.recipe.map(({ op, enabled, config }) => ({ op, enabled, config }));
   const zipName = (document.getElementById('zipNameInput')?.value || '').trim();
+  const renameStep = state.recipe.find(s => s.op === 'rename');
   const payload = { recipe, zip: zipName };
+  // Surface the rename pattern as a top-level field so it's explicit and
+  // shareable in the URL hash (alongside the zip name).
+  if (renameStep && renameStep.config && renameStep.config.pattern) {
+    payload.rename = renameStep.config.pattern;
+  }
   history.replaceState(null, '', '#r=' + btoa(JSON.stringify(payload)));
 }
 
@@ -1213,6 +1259,12 @@ function loadRecipeFromHash() {
         enabled: s.enabled !== false,
         config: { ...OP_DEFS[s.op].defaultConfig, ...s.config }
       }));
+    // A top-level rename pattern in the hash takes precedence, so it can be
+    // set or shared directly via the URL.
+    if (!Array.isArray(parsed) && typeof parsed.rename === 'string' && parsed.rename) {
+      const renameStep = state.recipe.find(s => s.op === 'rename');
+      if (renameStep) renameStep.config = { ...renameStep.config, pattern: parsed.rename };
+    }
     return true;
   } catch { return false; }
 }
@@ -2123,6 +2175,31 @@ clearFilesBtn.addEventListener('click', () => {
   downloadIndivBtn.disabled = true;
   updateProgress(0, 0, 0, 0);
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Theme toggle (light / dark)
+// ═══════════════════════════════════════════════════════════════
+const THEME_KEY = 'imagechef-theme';
+const themeToggle = document.getElementById('themeToggle');
+
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  themeToggle.textContent = theme === 'light' ? '☀️' : '🌙';
+  themeToggle.title = theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode';
+}
+
+themeToggle.addEventListener('click', () => {
+  const next = currentTheme() === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* ignore */ }
+  applyTheme(next);
+});
+
+// Sync the icon with the theme already set by the inline head script.
+applyTheme(currentTheme());
 
 // ═══════════════════════════════════════════════════════════════
 // Init
