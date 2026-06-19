@@ -677,6 +677,41 @@ function escHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+// Characters that are illegal or non-portable in filenames across Windows,
+// macOS and Linux. Tokens like {name} keep working — { } are allowed.
+const ILLEGAL_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
+
+function sanitizeFilenameField(s) {
+  return String(s).replace(ILLEGAL_FILENAME_CHARS, '');
+}
+
+// Strip unsafe characters as the user types, preserving caret position.
+function attachFilenameSanitizer(input) {
+  input.addEventListener('input', () => {
+    const clean = sanitizeFilenameField(input.value);
+    if (clean === input.value) return;
+    const removed = input.value.length - clean.length;
+    const pos = Math.max(0, (input.selectionStart || clean.length) - removed);
+    input.value = clean;
+    try { input.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+  });
+}
+
+// Unicode-safe base64 so non-ASCII (but filesystem-valid) text round-trips.
+// Pure-ASCII payloads decode identically to atob(), keeping old hashes valid.
+function b64encodeUnicode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function b64decodeUnicode(str) {
+  const bin = atob(str);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 const SUPPORTED_EXTS = new Set(['jpg','jpeg','png','webp','gif','bmp','heic','heif']);
 
 function extOf(name) { return (name.split('.').pop() || '').toLowerCase(); }
@@ -1058,7 +1093,8 @@ const OP_DEFS = {
       const input = document.createElement('input');
       input.type = 'text'; input.value = config.pattern; input.style.width = '150px';
       input.setAttribute('aria-label', 'Rename pattern');
-      input.addEventListener('change', () => update({ ...config, pattern: input.value || '{name}' }));
+      attachFilenameSanitizer(input);
+      input.addEventListener('change', () => update({ ...config, pattern: sanitizeFilenameField(input.value) || '{name}' }));
       row.appendChild(label); row.appendChild(input);
       div.appendChild(row);
 
@@ -1237,14 +1273,14 @@ function saveRecipeToHash() {
   if (renameStep && renameStep.config && renameStep.config.pattern) {
     payload.rename = renameStep.config.pattern;
   }
-  history.replaceState(null, '', '#r=' + btoa(JSON.stringify(payload)));
+  history.replaceState(null, '', '#r=' + b64encodeUnicode(JSON.stringify(payload)));
 }
 
 function loadRecipeFromHash() {
   const m = location.hash.match(/^#r=(.+)/);
   if (!m) return false;
   try {
-    const parsed = JSON.parse(atob(m[1]));
+    const parsed = JSON.parse(b64decodeUnicode(m[1]));
     // Backward compat: old format was a bare array of steps.
     const steps = Array.isArray(parsed) ? parsed : parsed.recipe;
     if (!Array.isArray(parsed) && typeof parsed.zip === 'string' && parsed.zip) {
@@ -2158,7 +2194,9 @@ bakeBtn.addEventListener('click', bake);
 downloadZipBtn.addEventListener('click', downloadZip);
 downloadIndivBtn.addEventListener('click', downloadIndividually);
 
-document.getElementById('zipNameInput').addEventListener('change', saveRecipeToHash);
+const zipNameInput = document.getElementById('zipNameInput');
+attachFilenameSanitizer(zipNameInput);
+zipNameInput.addEventListener('change', saveRecipeToHash);
 
 clearFilesBtn.addEventListener('click', () => {
   for (const e of state.files) {
