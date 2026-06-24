@@ -1315,6 +1315,81 @@ const OP_DEFS = {
     }
   },
 
+  integerScale: {
+    name: 'Integer Scale',
+    defaultConfig: { factor: 2 },
+    renderUI(config, update) {
+      const div = document.createElement('div');
+      div.className = 'recipe-op-body';
+      div.style.display = 'flex';
+      div.style.flexDirection = 'column';
+      div.style.gap = '8px';
+
+      const row = document.createElement('div');
+      row.className = 'field-row';
+      const label = document.createElement('label'); label.textContent = 'Factor';
+      const input = document.createElement('input');
+      input.type = 'number'; input.value = config.factor; input.min = 1; input.max = 64; input.step = 1;
+      input.setAttribute('aria-label', 'Integer scale factor');
+      input.addEventListener('change', () => {
+        let v = Math.round(parseFloat(input.value));
+        if (!Number.isFinite(v) || v < 1) v = 2;
+        input.value = v;
+        update({ ...config, factor: v });
+      });
+      const unit = document.createElement('span'); unit.className = 'unit'; unit.textContent = '× smaller';
+      row.appendChild(label); row.appendChild(input); row.appendChild(unit);
+      div.appendChild(row);
+
+      const notice = document.createElement('div');
+      notice.className = 'notice';
+      notice.textContent = 'Averages each N×N block of pixels into one. Factor 2 halves the dimensions, 3 thirds them, and so on.';
+      div.appendChild(notice);
+
+      return div;
+    },
+    async apply(canvas, meta, config) {
+      const factor = Math.max(1, Math.round(config.factor) || 1);
+      if (factor <= 1) return { canvas, meta };
+
+      const srcW = canvas.width, srcH = canvas.height;
+      const outW = Math.max(1, Math.floor(srcW / factor));
+      const outH = Math.max(1, Math.floor(srcH / factor));
+      if (outW === srcW && outH === srcH) return { canvas, meta };
+
+      const src = canvas.getContext('2d').getImageData(0, 0, srcW, srcH).data;
+
+      const out = document.createElement('canvas');
+      out.width = outW; out.height = outH;
+      const octx = out.getContext('2d');
+      const dst = octx.createImageData(outW, outH);
+      const d = dst.data;
+      const n = factor * factor;
+
+      for (let oy = 0; oy < outH; oy++) {
+        const y0 = oy * factor;
+        for (let ox = 0; ox < outW; ox++) {
+          const x0 = ox * factor;
+          let r = 0, g = 0, b = 0, a = 0;
+          for (let dy = 0; dy < factor; dy++) {
+            let si = ((y0 + dy) * srcW + x0) * 4;
+            for (let dx = 0; dx < factor; dx++) {
+              r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3];
+              si += 4;
+            }
+          }
+          const di = (oy * outW + ox) * 4;
+          d[di] = Math.round(r / n);
+          d[di + 1] = Math.round(g / n);
+          d[di + 2] = Math.round(b / n);
+          d[di + 3] = Math.round(a / n);
+        }
+      }
+      octx.putImageData(dst, 0, 0);
+      return { canvas: out, meta };
+    }
+  },
+
 };
 
 // ═══════════════════════════════════════════════════════════════
