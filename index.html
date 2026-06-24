@@ -401,6 +401,9 @@
   .status-processing { background: rgba(15,155,142,0.3); color: var(--accent2); }
   .status-done { background: rgba(76,175,80,0.25); color: var(--status-done-fg); }
   .status-failed { background: rgba(244,67,54,0.25); color: var(--status-failed-fg); }
+  .status-skipped { background: rgba(160,160,160,0.2); color: var(--text-dim); }
+  .btn-remove-file { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 3px; line-height: 1; }
+  .btn-remove-file:hover { background: rgba(244,67,54,0.2); color: var(--status-failed-fg); }
   .savings { color: var(--accent2); font-weight: 600; }
   .savings.negative { color: var(--warning); }
   /* ── Progress Bar ── */
@@ -605,11 +608,12 @@
             <th>Output Size</th>
             <th>Saved</th>
             <th>Status</th>
+            <th></th>
           </tr>
         </thead>
         <tbody id="fileTableBody">
           <tr id="emptyRow">
-            <td colspan="7" style="text-align:center;padding:30px;color:var(--text-dim)">
+            <td colspan="8" style="text-align:center;padding:30px;color:var(--text-dim)">
               Add images to get started
             </td>
           </tr>
@@ -1220,6 +1224,50 @@ const OP_DEFS = {
     }
   },
 
+  dedup: {
+    name: 'Remove Duplicates',
+    defaultConfig: { by: 'name+size' },
+    renderUI(config, update) {
+      const div = document.createElement('div');
+      div.className = 'recipe-op-body';
+      div.style.display = 'flex';
+      div.style.flexDirection = 'column';
+      div.style.gap = '8px';
+
+      const row = document.createElement('div');
+      row.className = 'field-row';
+      const label = document.createElement('label'); label.textContent = 'Match by';
+      const sel = document.createElement('select');
+      sel.setAttribute('aria-label', 'Dedup match method');
+      [['name+size','Name + size'],['name','Name only']].forEach(([v,t]) => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = t;
+        if (v === config.by) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', () => update({ ...config, by: sel.value }));
+      row.appendChild(label); row.appendChild(sel);
+      div.appendChild(row);
+
+      const notice = document.createElement('div');
+      notice.className = 'notice';
+      notice.textContent = 'Duplicate files are skipped during bake';
+      div.appendChild(notice);
+
+      return div;
+    },
+    preprocess(files, config) {
+      const seen = new Set();
+      const keep = [], skip = [];
+      for (const f of files) {
+        const key = config.by === 'name+size' ? f.name + '\0' + f.origSize : f.name;
+        if (seen.has(key)) { skip.push(f); } else { seen.add(key); keep.push(f); }
+      }
+      return { keep, skip };
+    },
+    async apply(canvas, meta, config) { return { canvas, meta }; },
+  },
+
   grayscale: {
     name: 'Grayscale',
     defaultConfig: { method: 'luminance' },
@@ -1675,10 +1723,25 @@ function addTableRow(entry) {
     <td id="outsize-${entry.id}">—</td>
     <td id="savings-${entry.id}">—</td>
     <td><span class="status-badge status-queued" id="status-${entry.id}">Queued</span></td>
+    <td><button class="btn-remove-file" title="Remove file" aria-label="Remove ${escHtml(entry.name)}">✕</button></td>
   `;
+  tr.querySelector('.btn-remove-file').addEventListener('click', e => {
+    e.stopPropagation();
+    removeFile(entry);
+  });
   tr.addEventListener('click', () => openPreview(entry));
   fileTableBody.appendChild(tr);
   entry.row = tr;
+}
+
+function removeFile(entry) {
+  if (entry.origUrl) URL.revokeObjectURL(entry.origUrl);
+  if (entry.outUrl) URL.revokeObjectURL(entry.outUrl);
+  state.files = state.files.filter(e => e.id !== entry.id);
+  if (entry.row && entry.row.parentNode) entry.row.parentNode.removeChild(entry.row);
+  updateEmptyRow();
+  updateFileCount();
+  updateBakeBtn();
 }
 
 function updateRowThumb(entry) {
@@ -1713,7 +1776,7 @@ function updateRowStatus(entry) {
   const statusEl = document.getElementById('status-' + entry.id);
   if (statusEl) {
     statusEl.className = 'status-badge status-' + entry.status;
-    statusEl.textContent = { queued: 'Queued', processing: 'Processing…', done: 'Done', failed: 'Failed' }[entry.status] || entry.status;
+    statusEl.textContent = { queued: 'Queued', processing: 'Processing…', done: 'Done', failed: 'Failed', skipped: 'Duplicate' }[entry.status] || entry.status;
   }
   if (entry.row) {
     entry.row.className = entry.status === 'done' ? 'done'
@@ -1910,10 +1973,20 @@ async function bake() {
     if (e.outUrl) { URL.revokeObjectURL(e.outUrl); e.outUrl = null; }
     updateRowStatus(e);
   }
-  updateProgress(0, state.files.length, 0, 0);
+
+  // Apply dedup preprocess if the step is enabled
+  let filesToProcess = state.files;
+  const dedupStep = state.recipe.find(s => s.op === 'dedup' && s.enabled);
+  if (dedupStep) {
+    const { keep, skip } = OP_DEFS.dedup.preprocess(state.files, dedupStep.config);
+    for (const e of skip) { e.status = 'skipped'; updateRowStatus(e); }
+    filesToProcess = keep;
+  }
+
+  updateProgress(0, filesToProcess.length, 0, 0);
 
   try {
-    await processPool(state.files, state.recipe, 3);
+    await processPool(filesToProcess, state.recipe, 3);
   } finally {
     state.baking = false;
     bakeBtn.disabled = false;
