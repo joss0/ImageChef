@@ -780,9 +780,10 @@ function drawStepped(source, srcW, srcH, dstW, dstH) {
 function sampleAlpha(canvas) {
   try {
     const ctx = canvas.getContext('2d');
-    const sw = Math.min(canvas.width, 128);
-    const sh = Math.min(canvas.height, 128);
-    const data = ctx.getImageData(0, 0, sw, sh).data;
+    // Scan the FULL frame: alpha anywhere disqualifies a JPEG flatten. Sampling
+    // only a corner (or a downscaled copy) can miss a small transparent region
+    // and silently composite it onto black.
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
     for (let i = 3; i < data.length; i += 4) {
       if (data[i] < 255) return true;
     }
@@ -836,13 +837,184 @@ async function compressToTarget(canvas, mime, targetBytes) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// JPEG metadata
+//
+// Canvas re-encoding always discards EXIF / XMP / ICC. Metadata therefore
+// survives ONLY on a pure JPEG→JPEG passthrough (no pixel-mutating op, no format
+// change), where processEntry emits the original bytes untouched. We never splice
+// the original metadata back onto canvas-re-encoded pixels: that would re-apply
+// the EXIF rotation already baked into the pixels and mislabel the (now sRGB)
+// colour space — silent corruption. The helpers here only READ metadata, or
+// losslessly STRIP it from the original bytes.
+//
+// The pure byte-level helpers below are deliberately DOM-free so they can be
+// unit-tested in Node (see tests/jpeg-meta.test.mjs); keep them between the
+// JPEG-META-LIB sentinels so the test harness can extract them verbatim.
+// ═══════════════════════════════════════════════════════════════
+// ===== JPEG-META-LIB-START =====
+// Read the metadata-bearing APPn marker segments out of a JPEG. Each returned
+// segment is the raw bytes (marker + length + payload). `isJpeg` reports whether
+// the input even looked like a JPEG.
+function readJpegMetaSegments(bytes) {
+  const out = { isJpeg: false, exif: null, xmp: null, icc: [] };
+  if (bytes.length < 2 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return out;
+  out.isJpeg = true;
+
+  const EXIF_SIG = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];                  // "Exif\0\0"
+  const XMP_SIG = 'http://ns.adobe.com/xap/1.0/\0';
+  const ICC_SIG = [0x49,0x43,0x43,0x5F,0x50,0x52,0x4F,0x46,0x49,0x4C,0x45,0x00]; // "ICC_PROFILE\0"
+
+  function matches(off, sig) {
+    for (let i = 0; i < sig.length; i++) {
+      const c = typeof sig === 'string' ? sig.charCodeAt(i) : sig[i];
+      if (bytes[off + i] !== c) return false;
+    }
+    return true;
+  }
+
+  let p = 2;
+  while (p + 4 <= bytes.length) {
+    if (bytes[p] !== 0xFF) break;
+    const marker = bytes[p + 1];
+    if (marker === 0xD9 || marker === 0xDA) break;            // EOI / start of scan
+    if (marker >= 0xD0 && marker <= 0xD7) { p += 2; continue; } // RSTn (no payload)
+    const len = (bytes[p + 2] << 8) | bytes[p + 3];          // big-endian, includes itself
+    if (len < 2) break;
+    const segEnd = p + 2 + len;
+    if (segEnd > bytes.length) break;
+    const dataOff = p + 4;
+    if (marker === 0xE1) {                                    // APP1: EXIF or XMP
+      if (!out.exif && matches(dataOff, EXIF_SIG)) out.exif = bytes.slice(p, segEnd);
+      else if (!out.xmp && matches(dataOff, XMP_SIG)) out.xmp = bytes.slice(p, segEnd);
+    } else if (marker === 0xE2 && matches(dataOff, ICC_SIG)) {// APP2: ICC (may be multi-chunk)
+      out.icc.push(bytes.slice(p, segEnd));
+    }
+    p = segEnd;
+  }
+  return out;
+}
+
+// Losslessly remove the metadata-bearing APP segments (EXIF/XMP/ICC) from a
+// JPEG, copying every other segment verbatim — no pixel re-encode. Used for the
+// passthrough + Strip Metadata case (lossless strip without re-encoding pixels).
+function stripJpegMeta(bytes) {
+  if (bytes.length < 2 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return bytes;
+  const EXIF_SIG = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+  const XMP_SIG = 'http://ns.adobe.com/xap/1.0/\0';
+  const ICC_SIG = [0x49,0x43,0x43,0x5F,0x50,0x52,0x4F,0x46,0x49,0x4C,0x45,0x00];
+  function matches(off, sig) {
+    for (let i = 0; i < sig.length; i++) {
+      const c = typeof sig === 'string' ? sig.charCodeAt(i) : sig[i];
+      if (bytes[off + i] !== c) return false;
+    }
+    return true;
+  }
+  const keep = [bytes.subarray(0, 2)]; // SOI
+  let p = 2;
+  while (p + 4 <= bytes.length) {
+    if (bytes[p] !== 0xFF) { keep.push(bytes.subarray(p)); p = bytes.length; break; }
+    const marker = bytes[p + 1];
+    if (marker === 0xDA || marker === 0xD9) { keep.push(bytes.subarray(p)); p = bytes.length; break; } // SOS/EOI: copy the rest
+    if (marker >= 0xD0 && marker <= 0xD7) { keep.push(bytes.subarray(p, p + 2)); p += 2; continue; }   // RSTn
+    const len = (bytes[p + 2] << 8) | bytes[p + 3];
+    if (len < 2) { keep.push(bytes.subarray(p)); p = bytes.length; break; }
+    const segEnd = p + 2 + len;
+    if (segEnd > bytes.length) { keep.push(bytes.subarray(p)); p = bytes.length; break; }
+    const dataOff = p + 4;
+    let drop = false;
+    if (marker === 0xE1 && (matches(dataOff, EXIF_SIG) || matches(dataOff, XMP_SIG))) drop = true;
+    else if (marker === 0xE2 && matches(dataOff, ICC_SIG)) drop = true;
+    if (!drop) keep.push(bytes.subarray(p, segEnd));
+    p = segEnd;
+  }
+  if (p < bytes.length) keep.push(bytes.subarray(p)); // flush any trailing bytes
+  let total = 0;
+  for (const s of keep) total += s.length;
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const s of keep) { out.set(s, o); o += s.length; }
+  return out;
+}
+
+// Read EXIF DateTimeOriginal (tag 0x9003, else IFD0 DateTime 0x0132) as
+// "YYYY-MM-DD", or null. Lets {date} resolve from the capture date rather than
+// the wall clock, keeping renames reproducible.
+function readJpegDateTimeOriginal(bytes) {
+  const meta = readJpegMetaSegments(bytes);
+  if (!meta.exif) return null;
+  const b = meta.exif;
+  const tiff = 10;
+  if (tiff + 8 > b.length) return null;
+  let le;
+  if (b[tiff] === 0x49 && b[tiff + 1] === 0x49) le = true;
+  else if (b[tiff] === 0x4D && b[tiff + 1] === 0x4D) le = false;
+  else return null;
+  const u16 = o => le ? (b[o] | (b[o + 1] << 8)) : ((b[o] << 8) | b[o + 1]);
+  const u32 = o => le
+    ? (b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216)
+    : (b[o] * 16777216 + b[o + 1] * 65536 + b[o + 2] * 256 + b[o + 3]);
+  function findInIFD(ifdAbs, tag) {
+    if (ifdAbs < 0 || ifdAbs + 2 > b.length) return -1;
+    const count = u16(ifdAbs);
+    for (let i = 0, e = ifdAbs + 2; i < count && e + 12 <= b.length; i++, e += 12) {
+      if (u16(e) === tag) return e;
+    }
+    return -1;
+  }
+  const ifd0 = tiff + u32(tiff + 4);
+  let dateEntry = -1;
+  const exifPtr = findInIFD(ifd0, 0x8769);
+  if (exifPtr >= 0) dateEntry = findInIFD(tiff + u32(exifPtr + 8), 0x9003);
+  if (dateEntry < 0) dateEntry = findInIFD(ifd0, 0x0132);
+  if (dateEntry < 0) return null;
+  if (u16(dateEntry + 2) !== 2 || u32(dateEntry + 4) < 10) return null; // ASCII, ≥10 chars
+  const off = tiff + u32(dateEntry + 8); // >4 bytes ⇒ value is an offset
+  if (off < 0 || off + 10 > b.length) return null;
+  let s = '';
+  for (let i = 0; i < 10; i++) s += String.fromCharCode(b[off + i]);
+  const m = s.match(/^(\d{4}):(\d{2}):(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+// Read the EXIF Orientation value (1–8) from a JPEG's APP1 segment, or null if
+// absent. Runs on the original file bytes, before any decode, so the implicit
+// "bake to upright" step can be surfaced to the user.
+function readJpegOrientation(bytes) {
+  const meta = readJpegMetaSegments(bytes);
+  if (!meta.exif) return null;
+  const b = meta.exif;
+  const tiff = 10;
+  if (tiff + 8 > b.length) return null;
+  let le;
+  if (b[tiff] === 0x49 && b[tiff + 1] === 0x49) le = true;
+  else if (b[tiff] === 0x4D && b[tiff + 1] === 0x4D) le = false;
+  else return null;
+  const u16 = o => le ? (b[o] | (b[o + 1] << 8)) : ((b[o] << 8) | b[o + 1]);
+  const u32 = o => le
+    ? (b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216)
+    : (b[o] * 16777216 + b[o + 1] * 65536 + b[o + 2] * 256 + b[o + 3]);
+  const ifd0 = tiff + u32(tiff + 4);
+  if (ifd0 < 0 || ifd0 + 2 > b.length) return null;
+  const count = u16(ifd0);
+  for (let i = 0, e = ifd0 + 2; i < count && e + 12 <= b.length; i++, e += 12) {
+    if (u16(e) === 0x0112) {
+      const v = u16(e + 8);
+      return (v >= 1 && v <= 8) ? v : null;
+    }
+  }
+  return null;
+}
+
+// ===== JPEG-META-LIB-END =====
+
+// ═══════════════════════════════════════════════════════════════
 // Op Registry
 // ═══════════════════════════════════════════════════════════════
 const OP_DEFS = {
 
   resize: {
     name: 'Resize',
-    defaultConfig: { mode: 'fit', w: 1920, h: 1080, percent: 75, longest: 1600 },
+    defaultConfig: { mode: 'fit', w: 1920, h: 1080, percent: 75, longest: 1600, allowUpscale: false },
     renderUI(config, update) {
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
@@ -859,7 +1031,7 @@ const OP_DEFS = {
         modeLabel.textContent = 'Mode';
         const modeSelect = document.createElement('select');
         modeSelect.setAttribute('aria-label', 'Resize mode');
-        [['fit','Fit within'],['exact','Exact'],['percent','Percentage'],['longest','Longest edge cap']].forEach(([v,t]) => {
+        [['fit','Fit within'],['percent','Percentage'],['longest','Longest edge cap']].forEach(([v,t]) => {
           const o = document.createElement('option');
           o.value = v; o.textContent = t;
           if (v === config.mode) o.selected = true;
@@ -870,7 +1042,7 @@ const OP_DEFS = {
         modeRow.appendChild(modeSelect);
         div.appendChild(modeRow);
 
-        if (config.mode === 'fit' || config.mode === 'exact') {
+        if (config.mode === 'fit') {
           const fitRow = document.createElement('div');
           fitRow.className = 'field-row';
           const wLabel = document.createElement('label'); wLabel.textContent = 'Max W';
@@ -917,6 +1089,23 @@ const OP_DEFS = {
           div.appendChild(longRow);
         }
 
+        // Fit/Longest never enlarge a smaller source unless this is ticked, so
+        // upscaling is an explicit, visible choice rather than a silent default.
+        if (config.mode === 'fit' || config.mode === 'longest') {
+          const upRow = document.createElement('div');
+          upRow.className = 'field-row';
+          const upWrap = document.createElement('label');
+          upWrap.style.cssText = 'min-width:unset;display:flex;gap:6px;align-items:center;cursor:pointer';
+          const upCb = document.createElement('input');
+          upCb.type = 'checkbox'; upCb.checked = !!config.allowUpscale;
+          upCb.setAttribute('aria-label', 'Allow upscaling smaller sources');
+          upCb.addEventListener('change', () => update({ ...config, allowUpscale: upCb.checked }));
+          upWrap.appendChild(upCb);
+          upWrap.appendChild(document.createTextNode(' Allow upscale'));
+          upRow.appendChild(upWrap);
+          div.appendChild(upRow);
+        }
+
       }
 
       html();
@@ -925,30 +1114,40 @@ const OP_DEFS = {
     async apply(canvas, meta, config) {
       const srcW = canvas.width, srcH = canvas.height;
       let tw, th;
-      const { mode } = config;
+      // 'exact' is a removed legacy mode; treat saved recipes that still carry it
+      // as 'fit' (it always behaved identically).
+      const mode = config.mode === 'exact' ? 'fit' : config.mode;
 
-      if (mode === 'fit' || mode === 'exact') {
-        const scale = Math.min(config.w / srcW, config.h / srcH);
+      if (mode === 'fit') {
+        let scale = Math.min(config.w / srcW, config.h / srcH);
+        if (!config.allowUpscale) scale = Math.min(scale, 1); // never enlarge unless asked
         tw = Math.round(srcW * scale); th = Math.round(srcH * scale);
       } else if (mode === 'percent') {
-        const s = config.percent / 100;
+        const s = config.percent / 100; // explicit scale; may exceed 100%
         tw = Math.round(srcW * s); th = Math.round(srcH * s);
       } else if (mode === 'longest') {
-        const longest = Math.max(srcW, srcH);
-        const scale = config.longest / longest;
+        let scale = config.longest / Math.max(srcW, srcH);
+        if (!config.allowUpscale) scale = Math.min(scale, 1);
         tw = Math.round(srcW * scale);
         th = Math.round(srcH * scale);
       } else {
         tw = srcW; th = srcH;
       }
 
-      const clampScale = Math.min(MAX_CANVAS_DIM / tw, MAX_CANVAS_DIM / th, 1);
-      tw = Math.max(1, Math.round(tw * clampScale));
-      th = Math.max(1, Math.round(th * clampScale));
+      tw = Math.max(1, tw); th = Math.max(1, th);
 
-      if (tw === srcW && th === srcH) return { canvas, meta };
+      // Surface when the requested size is clamped by the max canvas dimension.
+      const clampScale = Math.min(MAX_CANVAS_DIM / tw, MAX_CANVAS_DIM / th, 1);
+      let outMeta = meta;
+      if (clampScale < 1) {
+        tw = Math.max(1, Math.round(tw * clampScale));
+        th = Math.max(1, Math.round(th * clampScale));
+        outMeta = { ...meta, _resizeClamped: { w: tw, h: th } };
+      }
+
+      if (tw === srcW && th === srcH) return { canvas, meta: outMeta };
       const outCanvas = drawStepped(canvas, srcW, srcH, tw, th);
-      return { canvas: outCanvas, meta };
+      return { canvas: outCanvas, meta: outMeta };
     }
   },
 
@@ -1024,40 +1223,79 @@ const OP_DEFS = {
         : (config.perKB * 1024);
 
       const { blob, canvas: outCanvas } = await compressToTarget(canvas, meta.mime, targetBytes);
-      return { canvas: outCanvas, meta: { ...meta, _compressBlob: blob } };
+      const newMeta = { ...meta, _compressBlob: blob };
+      // The byte budget can only be met by dropping resolution once the quality
+      // floor is exhausted — record it so the per-file report can say so.
+      if (outCanvas.width !== canvas.width || outCanvas.height !== canvas.height) {
+        newMeta._compressShrunk = { w: outCanvas.width, h: outCanvas.height };
+      }
+      return { canvas: outCanvas, meta: newMeta };
     }
   },
 
   format: {
     name: 'Format Convert',
-    defaultConfig: { output: 'keep' },
+    defaultConfig: { output: 'keep', quality: 0.88 },
     renderUI(config, update) {
+      let cur = config;
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
       div.style.display = 'flex';
       div.style.flexDirection = 'column';
       div.style.gap = '8px';
 
-      const row = document.createElement('div');
-      row.className = 'field-row';
-      const label = document.createElement('label'); label.textContent = 'Output format';
-      const sel = document.createElement('select');
-      sel.setAttribute('aria-label', 'Output format');
-      [['jpeg','JPEG'],['webp','WebP'],['png','PNG'],['keep','Keep original']].forEach(([v,t]) => {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = t;
-        if (v === config.output) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.addEventListener('change', () => update({ ...config, output: sel.value }));
-      row.appendChild(label); row.appendChild(sel);
-      div.appendChild(row);
+      function html() {
+        div.innerHTML = '';
 
-      const notice = document.createElement('div');
-      notice.className = 'notice';
-      notice.textContent = 'PNG with alpha channel is kept as PNG even when JPEG is selected.';
-      div.appendChild(notice);
+        const row = document.createElement('div');
+        row.className = 'field-row';
+        const label = document.createElement('label'); label.textContent = 'Output format';
+        const sel = document.createElement('select');
+        sel.setAttribute('aria-label', 'Output format');
+        [['jpeg','JPEG'],['webp','WebP'],['png','PNG'],['keep','Keep original']].forEach(([v,t]) => {
+          const o = document.createElement('option');
+          o.value = v; o.textContent = t;
+          if (v === cur.output) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => { cur = { ...cur, output: sel.value }; update(cur); html(); });
+        row.appendChild(label); row.appendChild(sel);
+        div.appendChild(row);
 
+        // PNG is lossless, so the quality control does not apply; everything
+        // else is (or may be) a lossy encode and gets a visible quality knob.
+        if (cur.output === 'png') {
+          const note = document.createElement('div');
+          note.className = 'notice';
+          note.textContent = 'PNG is lossless — quality N/A.';
+          div.appendChild(note);
+        } else {
+          const qRow = document.createElement('div');
+          qRow.className = 'field-row';
+          const qLabel = document.createElement('label'); qLabel.textContent = 'Quality';
+          const qInput = document.createElement('input');
+          qInput.type = 'number'; qInput.min = 1; qInput.max = 100; qInput.step = 1;
+          qInput.value = Math.round((cur.quality ?? 0.88) * 100);
+          qInput.setAttribute('aria-label', 'Encode quality (1–100)');
+          qInput.addEventListener('change', () => {
+            let v = Math.round(parseFloat(qInput.value));
+            if (!Number.isFinite(v)) v = 88;
+            v = Math.min(100, Math.max(1, v));
+            qInput.value = v;
+            update({ ...cur, quality: v / 100 });
+          });
+          const qUnit = document.createElement('span'); qUnit.className = 'unit'; qUnit.textContent = '/ 100';
+          qRow.appendChild(qLabel); qRow.appendChild(qInput); qRow.appendChild(qUnit);
+          div.appendChild(qRow);
+        }
+
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.textContent = 'PNG with alpha channel is kept as PNG even when JPEG is selected. When a size-target Compress step is present, it overrides this quality to hit the byte budget.';
+        div.appendChild(notice);
+      }
+
+      html();
       return div;
     },
     async apply(canvas, meta, config) {
@@ -1075,8 +1313,11 @@ const OP_DEFS = {
         mime = 'image/png';
       }
 
+      // Surface the user-chosen encode quality so canvasToBlob stops using the
+      // invisible 0.88 fallback. PNG ignores it; a size-target Compress step
+      // overrides it later via its own search.
+      const newMeta = { ...meta, mime, quality: config.quality };
       // If mime changed invalidate any cached compress blob
-      const newMeta = { ...meta, mime };
       if (mime !== meta.mime) delete newMeta._compressBlob;
       return { canvas, meta: newMeta };
     }
@@ -1090,12 +1331,16 @@ const OP_DEFS = {
       div.className = 'recipe-op-body';
       const notice = document.createElement('div');
       notice.className = 'notice';
-      notice.textContent = 'EXIF, XMP, and ICC metadata are removed automatically during canvas re-encode. sRGB color space flattening may occur for wide-gamut images.';
+      notice.textContent = 'Metadata (EXIF/XMP/ICC) only survives a pure JPEG→JPEG passthrough — a recipe with no pixel-changing op (resize, rotate, grayscale, integer scale, compress) and no format change. With this step present, it is removed even in that case (losslessly, without re-encoding). Any pixel-changing op or format change re-encodes the image and drops metadata regardless of this step.';
       div.appendChild(notice);
       return div;
     },
+    // No-op in the pipeline. Its presence is the signal that, on an otherwise
+    // pure JPEG passthrough, the original metadata should be stripped (handled
+    // losslessly in processEntry). On any re-encoding recipe metadata is already
+    // gone, so this step is a no-op there.
     async apply(canvas, meta, config) {
-      return { canvas, meta }; // canvas encode already strips metadata
+      return { canvas, meta };
     }
   },
 
@@ -1131,10 +1376,9 @@ const OP_DEFS = {
       const outExt = mimeToExt(meta.mime);
       const namePart = meta.origName.replace(/\.[^.]+$/, '');
 
-      const today = new Date();
-      const date = today.getFullYear()
-        + '-' + String(today.getMonth() + 1).padStart(2, '0')
-        + '-' + String(today.getDate()).padStart(2, '0');
+      // {date} is resolved deterministically upstream (capture date → file
+      // mtime → recipe-frozen date), never from the wall clock at bake time.
+      const date = meta.dateToken || '';
 
       const result = config.pattern
         .replace(/{name}/g, namePart)
@@ -1270,7 +1514,8 @@ const OP_DEFS = {
 
   grayscale: {
     name: 'Grayscale',
-    defaultConfig: { method: 'luminance' },
+    // 'luma601' default; legacy 'luminance' recipes are treated as luma601.
+    defaultConfig: { method: 'luma601' },
     renderUI(config, update) {
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
@@ -1283,15 +1528,26 @@ const OP_DEFS = {
       const label = document.createElement('label'); label.textContent = 'Method';
       const sel = document.createElement('select');
       sel.setAttribute('aria-label', 'Grayscale method');
-      [['luminance','Luminance (BT.601)'],['average','Average']].forEach(([v,t]) => {
+      const cur = config.method === 'luminance' ? 'luma601' : config.method;
+      [
+        ['luma601', 'Luma (BT.601)'],
+        ['luma709', 'Luma (BT.709)'],
+        ['average', 'Average'],
+        ['lumin_linear', 'Luminance (linear, BT.709)'],
+      ].forEach(([v,t]) => {
         const o = document.createElement('option');
         o.value = v; o.textContent = t;
-        if (v === config.method) o.selected = true;
+        if (v === cur) o.selected = true;
         sel.appendChild(o);
       });
       sel.addEventListener('change', () => update({ ...config, method: sel.value }));
       row.appendChild(label); row.appendChild(sel);
       div.appendChild(row);
+
+      const notice = document.createElement('div');
+      notice.className = 'notice';
+      notice.textContent = 'Luma weights the gamma-encoded sRGB channels directly (fast, what most tools call “grayscale”). Linear luminance de-gammas to light-linear, weights with BT.709, then re-encodes to sRGB — physically correct but slower.';
+      div.appendChild(notice);
 
       return div;
     },
@@ -1299,12 +1555,29 @@ const OP_DEFS = {
       const ctx = canvas.getContext('2d');
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const d = imgData.data;
+      const method = config.method === 'luminance' ? 'luma601' : config.method;
+
+      // sRGB transfer-function helpers (only used for the linear method).
+      const toLinear = c => {
+        c /= 255;
+        return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+      };
+      const toSRGB = l => {
+        const v = l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
+        return Math.round(v * 255);
+      };
+
       for (let i = 0; i < d.length; i += 4) {
         let g;
-        if (config.method === 'luminance') {
-          g = Math.round(0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]);
-        } else {
+        if (method === 'average') {
           g = Math.round((d[i] + d[i+1] + d[i+2]) / 3);
+        } else if (method === 'luma709') {
+          g = Math.round(0.2126 * d[i] + 0.7152 * d[i+1] + 0.0722 * d[i+2]);
+        } else if (method === 'lumin_linear') {
+          const L = 0.2126 * toLinear(d[i]) + 0.7152 * toLinear(d[i+1]) + 0.0722 * toLinear(d[i+2]);
+          g = toSRGB(L);
+        } else { // luma601 (and legacy 'luminance')
+          g = Math.round(0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]);
         }
         d[i] = d[i+1] = d[i+2] = g;
       }
@@ -1353,8 +1626,10 @@ const OP_DEFS = {
       if (factor <= 1) return { canvas, meta };
 
       const srcW = canvas.width, srcH = canvas.height;
-      const outW = Math.max(1, Math.floor(srcW / factor));
-      const outH = Math.max(1, Math.floor(srcH / factor));
+      // ceil, not floor: a partial edge block is averaged over the pixels it
+      // actually covers rather than being silently cropped away.
+      const outW = Math.max(1, Math.ceil(srcW / factor));
+      const outH = Math.max(1, Math.ceil(srcH / factor));
       if (outW === srcW && outH === srcH) return { canvas, meta };
 
       const src = canvas.getContext('2d').getImageData(0, 0, srcW, srcH).data;
@@ -1364,25 +1639,35 @@ const OP_DEFS = {
       const octx = out.getContext('2d');
       const dst = octx.createImageData(outW, outH);
       const d = dst.data;
-      const n = factor * factor;
 
       for (let oy = 0; oy < outH; oy++) {
         const y0 = oy * factor;
+        const yEnd = Math.min(y0 + factor, srcH);
         for (let ox = 0; ox < outW; ox++) {
           const x0 = ox * factor;
-          let r = 0, g = 0, b = 0, a = 0;
-          for (let dy = 0; dy < factor; dy++) {
-            let si = ((y0 + dy) * srcW + x0) * 4;
-            for (let dx = 0; dx < factor; dx++) {
-              r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3];
+          const xEnd = Math.min(x0 + factor, srcW);
+          // Premultiply by alpha so transparent pixels (usually RGB 0,0,0) do
+          // not drag the block's colour toward black — that produces dark halos
+          // around semi-transparent edges. Output RGB is the alpha-weighted mean.
+          let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
+          for (let y = y0; y < yEnd; y++) {
+            let si = (y * srcW + x0) * 4;
+            for (let x = x0; x < xEnd; x++) {
+              const a = src[si + 3];
+              sumR += src[si] * a; sumG += src[si + 1] * a; sumB += src[si + 2] * a;
+              sumA += a; count++;
               si += 4;
             }
           }
           const di = (oy * outW + ox) * 4;
-          d[di] = Math.round(r / n);
-          d[di + 1] = Math.round(g / n);
-          d[di + 2] = Math.round(b / n);
-          d[di + 3] = Math.round(a / n);
+          if (sumA > 0) {
+            d[di] = Math.round(sumR / sumA);
+            d[di + 1] = Math.round(sumG / sumA);
+            d[di + 2] = Math.round(sumB / sumA);
+          } else {
+            d[di] = d[di + 1] = d[di + 2] = 0;
+          }
+          d[di + 3] = Math.round(sumA / count);
         }
       }
       octx.putImageData(dst, 0, 0);
@@ -1399,6 +1684,9 @@ const state = {
   files: [],
   baking: false,
   recipe: [],
+  // The date frozen into the recipe at creation — last-resort {date} source so
+  // output names never depend on the wall clock at bake time.
+  recipeFrozenDate: null,
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -1414,6 +1702,9 @@ function saveRecipeToHash() {
   if (renameStep && renameStep.config && renameStep.config.pattern) {
     payload.rename = renameStep.config.pattern;
   }
+  // Persist the frozen date so a shared recipe reproduces identical {date}
+  // output for files that lack their own date.
+  if (state.recipeFrozenDate) payload.frozen = state.recipeFrozenDate;
   history.replaceState(null, '', '#r=' + b64encodeUnicode(JSON.stringify(payload)));
 }
 
@@ -1441,6 +1732,9 @@ function loadRecipeFromHash() {
     if (!Array.isArray(parsed) && typeof parsed.rename === 'string' && parsed.rename) {
       const renameStep = state.recipe.find(s => s.op === 'rename');
       if (renameStep) renameStep.config = { ...renameStep.config, pattern: parsed.rename };
+    }
+    if (!Array.isArray(parsed) && typeof parsed.frozen === 'string') {
+      state.recipeFrozenDate = parsed.frozen;
     }
     return true;
   } catch { return false; }
@@ -1538,6 +1832,19 @@ function renderRecipeList() {
     // Remove button click
     removeBtn.addEventListener('click', e => {
       e.stopPropagation();
+      // Removing Strip Metadata changes behaviour on a pure passthrough (the
+      // original metadata is then kept), so make that explicit rather than silent.
+      if (step.op === 'strip') {
+        const ok = confirm(
+          'Remove “Strip Metadata”?\n\n' +
+          'On a pure JPEG→JPEG passthrough (no pixel-changing op, no format change), ' +
+          'removing this step makes ImageChef keep the original EXIF/XMP/ICC metadata ' +
+          '(camera info, GPS location, copyright, colour profile).\n\n' +
+          'On any recipe that re-encodes the pixels, metadata is dropped either way, ' +
+          'so this step has no effect there.'
+        );
+        if (!ok) return;
+      }
       state.recipe = state.recipe.filter(s => s.uid !== step.uid);
       saveRecipeToHash();
       renderRecipeList();
@@ -1683,6 +1990,17 @@ async function loadThumbAndDims(entry) {
   try {
     const ext = extOf(entry.name);
     let blob = entry.file;
+
+    // Read EXIF orientation (to surface the silent bake-to-upright step) and
+    // the capture date (for deterministic {date} renames) from the original
+    // bytes, in one pass.
+    if (ext === 'jpg' || ext === 'jpeg') {
+      try {
+        const bytes = new Uint8Array(await entry.file.arrayBuffer());
+        entry.orientation = readJpegOrientation(bytes);
+        entry.dateTimeOriginal = readJpegDateTimeOriginal(bytes);
+      } catch { entry.orientation = null; entry.dateTimeOriginal = null; }
+    }
 
     if (ext === 'heic' || ext === 'heif') {
       await ensureHeic2any();
@@ -1835,6 +2153,11 @@ function updateRowThumb(entry) {
   }
 }
 
+const ORIENTATION_LABELS = {
+  1: 'normal', 2: 'mirrored', 3: 'rotate 180°', 4: 'mirrored + 180°',
+  5: 'mirrored + 90° CW', 6: 'rotate 90° CW', 7: 'mirrored + 270° CW', 8: 'rotate 270° CW',
+};
+
 function updateRowDims(entry) {
   const el = document.getElementById('dims-' + entry.id);
   if (!el) return;
@@ -1844,6 +2167,25 @@ function updateRowDims(entry) {
       s += ' → ' + entry.outDims.w + '×' + entry.outDims.h;
     }
     el.textContent = s;
+    if (entry.orientation && entry.orientation !== 1) {
+      const o = document.createElement('small');
+      o.style.cssText = 'display:block;color:var(--text-dim)';
+      o.textContent = 'EXIF orientation ' + entry.orientation +
+        ' (' + (ORIENTATION_LABELS[entry.orientation] || 'unknown') + ')';
+      el.appendChild(o);
+    }
+    if (entry.compressNote) {
+      const c = document.createElement('small');
+      c.style.cssText = 'display:block;color:var(--warning)';
+      c.textContent = entry.compressNote;
+      el.appendChild(c);
+    }
+    if (entry.resizeNote) {
+      const r = document.createElement('small');
+      r.style.cssText = 'display:block;color:var(--warning)';
+      r.textContent = entry.resizeNote;
+      el.appendChild(r);
+    }
   }
 }
 
@@ -1852,6 +2194,34 @@ function updateRowStatus(entry) {
   if (statusEl) {
     statusEl.className = 'status-badge status-' + entry.status;
     statusEl.textContent = { queued: 'Queued', processing: 'Processing…', done: 'Done', failed: 'Failed', skipped: 'Duplicate' }[entry.status] || entry.status;
+
+    // Metadata preservation indicator (set during processEntry).
+    let metaEl = document.getElementById('metanote-' + entry.id);
+    if (entry.metaNote && entry.status === 'done') {
+      if (!metaEl) {
+        metaEl = document.createElement('span');
+        metaEl.id = 'metanote-' + entry.id;
+        metaEl.style.cssText = 'margin-left:6px;font-size:0.78rem;cursor:help;vertical-align:middle';
+        statusEl.after(metaEl);
+      }
+      if (entry.metaNote === 'kept') {
+        metaEl.textContent = '🏷️';
+        metaEl.title = 'Original metadata (EXIF/XMP/ICC) preserved — lossless JPEG passthrough';
+        metaEl.style.color = 'var(--accent2)';
+      } else if (entry.metaNote === 'stripped') {
+        metaEl.textContent = '🚫';
+        metaEl.title = 'Metadata removed losslessly (JPEG passthrough, Strip Metadata enabled)';
+        metaEl.style.color = 'var(--text-dim)';
+      } else if (entry.metaNote === 'reencoded') {
+        metaEl.textContent = '⚠';
+        metaEl.title = 'Metadata dropped — pixels were re-encoded';
+        metaEl.style.color = 'var(--warning)';
+      } else {
+        metaEl.remove();
+      }
+    } else if (metaEl) {
+      metaEl.remove();
+    }
   }
   if (entry.row) {
     entry.row.className = entry.status === 'done' ? 'done'
@@ -1869,10 +2239,11 @@ function updateRowStatus(entry) {
       }
     }
   }
-  if (entry.outName && entry.outName !== entry.name) {
+  const shownOut = entry.finalName || entry.outName;
+  if (shownOut && shownOut !== entry.name) {
     const nameEl = document.getElementById('name-' + entry.id);
     if (nameEl) {
-      nameEl.innerHTML = escHtml(entry.name) + '<br><small style="color:var(--accent2)">' + escHtml(entry.outName) + '</small>';
+      nameEl.innerHTML = escHtml(entry.name) + '<br><small style="color:var(--accent2)">' + escHtml(shownOut) + '</small>';
     }
   }
   updateRowDims(entry);
@@ -1927,7 +2298,9 @@ async function decodeToImageBitmap(entry) {
       const img = await new Promise((res, rej) => {
         const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url;
       });
-      const bmp = await createImageBitmap(img, { resizeQuality: 'high' });
+      // imageOrientation pinned explicitly: the default was 'none' on older
+      // engines, so leaving it implicit silently produced sideways output there.
+      const bmp = await createImageBitmap(img, { resizeQuality: 'high', imageOrientation: 'from-image' });
       URL.revokeObjectURL(url);
       return { bitmap: bmp, ext };
     } catch (e) {
@@ -1937,17 +2310,30 @@ async function decodeToImageBitmap(entry) {
   }
 
   try {
-    const bmp = await createImageBitmap(blob, { resizeQuality: 'high' });
+    const bmp = await createImageBitmap(blob, { resizeQuality: 'high', imageOrientation: 'from-image' });
     return { bitmap: bmp, ext };
   } catch {
     const url = URL.createObjectURL(blob);
     const img = await new Promise((res, rej) => {
       const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode failed')); i.src = url;
     });
-    const bmp = await createImageBitmap(img);
+    const bmp = await createImageBitmap(img, { imageOrientation: 'from-image' });
     URL.revokeObjectURL(url);
     return { bitmap: bmp, ext };
   }
+}
+
+// Ops that change pixels (or the container), so metadata cannot pass through.
+const PIXEL_MUTATING_OPS = new Set(['resize', 'rotate', 'grayscale', 'integerScale', 'compress']);
+
+// Format a millisecond timestamp as a UTC YYYY-MM-DD string. UTC (not local)
+// keeps the result identical across machines in different time zones.
+function fmtDateUTC(ms) {
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return null;
+  return d.getUTCFullYear()
+    + '-' + String(d.getUTCMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getUTCDate()).padStart(2, '0');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1967,6 +2353,12 @@ async function processEntry(entry, recipe, index, perFileBudget) {
     initCanvas.getContext('2d').drawImage(bitmap, 0, 0);
     bitmap.close && bitmap.close();
 
+    // Deterministic {date}: capture date (EXIF) → file mtime (UTC) → the date
+    // frozen into the recipe when it was created. Never the wall clock at bake.
+    const dateToken = entry.dateTimeOriginal
+      || (entry.file.lastModified ? fmtDateUTC(entry.file.lastModified) : null)
+      || state.recipeFrozenDate;
+
     const initMeta = {
       ext,
       index,
@@ -1977,17 +2369,53 @@ async function processEntry(entry, recipe, index, perFileBudget) {
       mime: chooseMimeFromExt(ext),
       outName: entry.name,
       perFileBudget,
+      dateToken,
     };
 
     const { canvas: outCanvas, meta: outMeta } = await applyRecipe(initCanvas, initMeta, recipe);
 
     entry.outDims = { w: outCanvas.width, h: outCanvas.height };
 
-    // Use pre-built blob from compress op when available (avoids double encode)
-    if (outMeta._compressBlob && outMeta.mime !== 'image/png') {
-      entry.outBlob = outMeta._compressBlob;
+    // Surface when Compress had to drop resolution to meet the byte budget,
+    // and when Resize was clamped by the max canvas dimension.
+    entry.compressNote = outMeta._compressShrunk
+      ? `downscaled to ${outMeta._compressShrunk.w}×${outMeta._compressShrunk.h} to meet the size budget`
+      : null;
+    entry.resizeNote = outMeta._resizeClamped
+      ? `clamped to ${outMeta._resizeClamped.w}×${outMeta._resizeClamped.h} (max canvas ${MAX_CANVAS_DIM}px)`
+      : null;
+
+    // Output + metadata contract. Metadata survives ONLY on a pure passthrough:
+    // JPEG source, JPEG output, zero pixel-mutating ops, no format change. Any
+    // other recipe re-encodes the pixels through canvas, which drops metadata —
+    // we never splice it back (that double-applies orientation and mislabels the
+    // colour space).
+    entry.metaNote = null;
+    const srcIsJpeg = /^jpe?g$/.test(extOf(entry.name));
+    const pixelMutated = recipe.some(s => s.enabled && PIXEL_MUTATING_OPS.has(s.op))
+      || outMeta.mime !== 'image/jpeg';
+    const stripEnabled = recipe.some(s => s.enabled && s.op === 'strip');
+
+    if (srcIsJpeg && !pixelMutated) {
+      // Passthrough: emit the ORIGINAL bytes (optionally with metadata stripped
+      // losslessly), never the canvas re-encode. Lossless and fully reproducible.
+      const origBytes = new Uint8Array(await entry.file.arrayBuffer());
+      if (stripEnabled) {
+        entry.outBlob = new Blob([stripJpegMeta(origBytes)], { type: 'image/jpeg' });
+        entry.metaNote = 'stripped';
+      } else {
+        entry.outBlob = new Blob([origBytes], { type: 'image/jpeg' });
+        entry.metaNote = 'kept';
+      }
     } else {
-      entry.outBlob = await canvasToBlob(outCanvas, outMeta.mime, outMeta.quality || 0.88);
+      // Re-encode path: prefer the compress blob, else encode the canvas.
+      if (outMeta._compressBlob && outMeta.mime !== 'image/png') {
+        entry.outBlob = outMeta._compressBlob;
+      } else {
+        entry.outBlob = await canvasToBlob(outCanvas, outMeta.mime, outMeta.quality || 0.88);
+      }
+      // A JPEG source whose pixels were re-encoded has lost its metadata.
+      if (srcIsJpeg) entry.metaNote = 'reencoded';
     }
 
     if (entry.outUrl) URL.revokeObjectURL(entry.outUrl);
@@ -2058,10 +2486,20 @@ async function bake() {
     filesToProcess = keep;
   }
 
+  // Process in a stable, locale-independent name order so {index}, the
+  // total-budget split, and collision suffixes are identical across runs
+  // regardless of the order files were dropped in.
+  filesToProcess = [...filesToProcess].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
   updateProgress(0, filesToProcess.length, 0, 0);
 
   try {
     await processPool(filesToProcess, state.recipe, 3);
+    // Resolve output-name collisions deterministically once all names exist.
+    const doneEntries = filesToProcess.filter(e => e.status === 'done');
+    assignUniqueOutputNames(doneEntries);
+    for (const e of doneEntries) updateRowStatus(e);
   } finally {
     state.baking = false;
     bakeBtn.disabled = false;
@@ -2072,31 +2510,48 @@ async function bake() {
   }
 }
 
+// Deterministically assign unique output filenames. Entries are visited in a
+// stable, locale-independent name order; the first use of a name keeps it, and
+// later collisions get a -001, -002 … suffix before the extension.
+function assignUniqueOutputNames(entries) {
+  const sorted = [...entries].sort((a, b) => {
+    const an = a.outName || a.name, bn = b.outName || b.name;
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
+  const used = new Map();
+  for (const e of sorted) {
+    let name = e.outName || e.name;
+    const key = name.toLowerCase();
+    const n = used.get(key) || 0;
+    used.set(key, n + 1);
+    if (n > 0) {
+      const suffix = '-' + String(n).padStart(3, '0');
+      const dot = name.lastIndexOf('.');
+      name = dot >= 0 ? name.slice(0, dot) + suffix + name.slice(dot) : name + suffix;
+    }
+    e.finalName = name;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Download
 // ═══════════════════════════════════════════════════════════════
 async function downloadZip() {
   const done = state.files.filter(e => e.status === 'done' && e.outBlob);
   if (!done.length) return;
+  // Ensure unique names exist (bake assigns them; guard in case of direct call)
+  // and emit in stable name order so the archive is byte-reproducible.
+  if (done.some(e => !e.finalName)) assignUniqueOutputNames(done);
+  done.sort((a, b) => {
+    const an = a.finalName || a.name, bn = b.finalName || b.name;
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
   downloadZipBtn.disabled = true;
   downloadZipBtn.textContent = '⏳ Zipping…';
   try {
     const zip = new JSZip();
-    const usedNames = new Map();
     for (const entry of done) {
-      let name = entry.outName || entry.name;
-      const key = name.toLowerCase();
-      if (usedNames.has(key)) {
-        const n = usedNames.get(key) + 1;
-        usedNames.set(key, n);
-        const dot = name.lastIndexOf('.');
-        name = dot >= 0
-          ? name.slice(0, dot) + '_' + n + name.slice(dot)
-          : name + '_' + n;
-      } else {
-        usedNames.set(key, 1);
-      }
-      zip.file(name, entry.outBlob, { compression: 'STORE' });
+      zip.file(entry.finalName || entry.outName || entry.name, entry.outBlob, { compression: 'STORE' });
     }
     const zipBlob = await zip.generateAsync({ type: 'blob' });
     const today = new Date();
@@ -2118,10 +2573,11 @@ async function downloadZip() {
 
 async function downloadIndividually() {
   const done = state.files.filter(e => e.status === 'done' && e.outUrl);
+  if (done.some(e => !e.finalName)) assignUniqueOutputNames(done);
   for (const entry of done) {
     const a = document.createElement('a');
     a.href = entry.outUrl;
-    a.download = entry.outName || entry.name;
+    a.download = entry.finalName || entry.outName || entry.name;
     a.click();
     await sleep(120);
   }
@@ -2217,7 +2673,7 @@ previewZoomReset.addEventListener('click', resetZoom);
 function openPreview(entry) {
   if (!entry.origUrl) return;
   resetZoom();
-  previewTitle.textContent = escHtml(entry.outName || entry.name);
+  previewTitle.textContent = escHtml(entry.finalName || entry.outName || entry.name);
   previewBefore.src = entry.origUrl;
   previewBeforeMeta.textContent = fmtBytes(entry.origSize) + (entry.dims ? ' · ' + entry.dims.w + '×' + entry.dims.h : '');
   if (entry.outUrl) {
@@ -2424,6 +2880,12 @@ if (darkMql) {
 // ═══════════════════════════════════════════════════════════════
 if (!loadRecipeFromHash()) {
   state.recipe = defaultRecipe();
+}
+// Freeze a date into the recipe once (the only clock read, captured here and
+// then serialized), used as the last-resort {date} source.
+if (!state.recipeFrozenDate) {
+  state.recipeFrozenDate = fmtDateUTC(Date.now());
+  saveRecipeToHash();
 }
 renderRecipeList();
 updateProgress(0, 0, 0, 0);
