@@ -780,9 +780,10 @@ function drawStepped(source, srcW, srcH, dstW, dstH) {
 function sampleAlpha(canvas) {
   try {
     const ctx = canvas.getContext('2d');
-    const sw = Math.min(canvas.width, 128);
-    const sh = Math.min(canvas.height, 128);
-    const data = ctx.getImageData(0, 0, sw, sh).data;
+    // Scan the FULL frame: alpha anywhere disqualifies a JPEG flatten. Sampling
+    // only a corner (or a downscaled copy) can miss a small transparent region
+    // and silently composite it onto black.
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
     for (let i = 3; i < data.length; i += 4) {
       if (data[i] < 255) return true;
     }
@@ -1499,8 +1500,10 @@ const OP_DEFS = {
       if (factor <= 1) return { canvas, meta };
 
       const srcW = canvas.width, srcH = canvas.height;
-      const outW = Math.max(1, Math.floor(srcW / factor));
-      const outH = Math.max(1, Math.floor(srcH / factor));
+      // ceil, not floor: a partial edge block is averaged over the pixels it
+      // actually covers rather than being silently cropped away.
+      const outW = Math.max(1, Math.ceil(srcW / factor));
+      const outH = Math.max(1, Math.ceil(srcH / factor));
       if (outW === srcW && outH === srcH) return { canvas, meta };
 
       const src = canvas.getContext('2d').getImageData(0, 0, srcW, srcH).data;
@@ -1510,25 +1513,35 @@ const OP_DEFS = {
       const octx = out.getContext('2d');
       const dst = octx.createImageData(outW, outH);
       const d = dst.data;
-      const n = factor * factor;
 
       for (let oy = 0; oy < outH; oy++) {
         const y0 = oy * factor;
+        const yEnd = Math.min(y0 + factor, srcH);
         for (let ox = 0; ox < outW; ox++) {
           const x0 = ox * factor;
-          let r = 0, g = 0, b = 0, a = 0;
-          for (let dy = 0; dy < factor; dy++) {
-            let si = ((y0 + dy) * srcW + x0) * 4;
-            for (let dx = 0; dx < factor; dx++) {
-              r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3];
+          const xEnd = Math.min(x0 + factor, srcW);
+          // Premultiply by alpha so transparent pixels (usually RGB 0,0,0) do
+          // not drag the block's colour toward black — that produces dark halos
+          // around semi-transparent edges. Output RGB is the alpha-weighted mean.
+          let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
+          for (let y = y0; y < yEnd; y++) {
+            let si = (y * srcW + x0) * 4;
+            for (let x = x0; x < xEnd; x++) {
+              const a = src[si + 3];
+              sumR += src[si] * a; sumG += src[si + 1] * a; sumB += src[si + 2] * a;
+              sumA += a; count++;
               si += 4;
             }
           }
           const di = (oy * outW + ox) * 4;
-          d[di] = Math.round(r / n);
-          d[di + 1] = Math.round(g / n);
-          d[di + 2] = Math.round(b / n);
-          d[di + 3] = Math.round(a / n);
+          if (sumA > 0) {
+            d[di] = Math.round(sumR / sumA);
+            d[di + 1] = Math.round(sumG / sumA);
+            d[di + 2] = Math.round(sumB / sumA);
+          } else {
+            d[di] = d[di + 1] = d[di + 2] = 0;
+          }
+          d[di + 3] = Math.round(sumA / count);
         }
       }
       octx.putImageData(dst, 0, 0);
