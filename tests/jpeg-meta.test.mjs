@@ -20,8 +20,8 @@ const block = html.match(
 );
 assert.ok(block, 'JPEG-META-LIB block not found in index.html');
 
-const { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta, readJpegOrientation } =
-  new Function(block[1] + '\nreturn { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta, readJpegOrientation };')();
+const { readJpegMetaSegments, stripJpegMeta, readJpegOrientation, readJpegDateTimeOriginal } =
+  new Function(block[1] + '\nreturn { readJpegMetaSegments, stripJpegMeta, readJpegOrientation, readJpegDateTimeOriginal };')();
 
 // ── Synthetic JPEG builders ──────────────────────────────────────
 // A minimal, valid-enough JPEG with a hand-built little-endian EXIF block
@@ -56,6 +56,40 @@ function buildExifSegment() {
   const exifSig = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00]; // "Exif\0\0"
   const payloadLen = exifSig.length + tiff.length;       // bytes after the length field, minus its own 2
   const len = payloadLen + 2;                            // length field counts itself
+  const seg = new Uint8Array(4 + payloadLen);
+  seg[0] = 0xFF; seg[1] = 0xE1; seg[2] = (len >> 8) & 0xFF; seg[3] = len & 0xFF;
+  seg.set(exifSig, 4);
+  seg.set(tiff, 4 + exifSig.length);
+  return seg;
+}
+
+// EXIF segment carrying a DateTimeOriginal (0x9003) in the Exif sub-IFD.
+// `dt` is an EXIF datetime string like "2021:07:04 12:34:56" (19 chars).
+function buildExifWithDate(dt) {
+  const LE = true;
+  // TIFF: IFD0 (1 entry: Exif ptr) → ExifIFD (1 entry: DateTimeOriginal) → string.
+  // Offsets relative to TIFF start:
+  //   IFD0 @8: count@8, entry@10, next@22  → ExifIFD @26
+  //   ExifIFD @26: count@26, entry@28, next@40 → string @44 (20 bytes)
+  const strBytes = dt + '\0';
+  const tiff = new Uint8Array(44 + 20);
+  const dv = new DataView(tiff.buffer);
+  tiff[0] = 0x49; tiff[1] = 0x49;
+  dv.setUint16(2, 0x2A, LE);
+  dv.setUint32(4, 8, LE);
+  // IFD0
+  dv.setUint16(8, 1, LE);
+  dv.setUint16(10, 0x8769, LE); dv.setUint16(12, 4, LE); dv.setUint32(14, 1, LE); dv.setUint32(18, 26, LE);
+  dv.setUint32(22, 0, LE);
+  // Exif sub-IFD
+  dv.setUint16(26, 1, LE);
+  dv.setUint16(28, 0x9003, LE); dv.setUint16(30, 2, LE); dv.setUint32(32, 20, LE); dv.setUint32(36, 44, LE);
+  dv.setUint32(40, 0, LE);
+  for (let i = 0; i < 20; i++) tiff[44 + i] = i < strBytes.length ? strBytes.charCodeAt(i) : 0;
+
+  const exifSig = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+  const payloadLen = exifSig.length + tiff.length;
+  const len = payloadLen + 2;
   const seg = new Uint8Array(4 + payloadLen);
   seg[0] = 0xFF; seg[1] = 0xE1; seg[2] = (len >> 8) & 0xFF; seg[3] = len & 0xFF;
   seg.set(exifSig, 4);
@@ -121,63 +155,49 @@ test('readJpegMetaSegments reports none when there is no metadata', () => {
   assert.equal(r.icc.length, 0);
 });
 
-// Orientation value lives at: seg 10 (TIFF) + 8 (IFD0) + 2 (entry count) + 8 (value field) = 28.
-const ORIENT_OFF = 28;
-
-test('normalizeExifSegment forces Orientation to 1', () => {
-  const seg = buildExifSegment();
-  assert.equal(readU16LE(seg, ORIENT_OFF), 6, 'fixture starts at Orientation 6');
-  const fixed = normalizeExifSegment(seg, 800, 600);
-  assert.equal(readU16LE(fixed, ORIENT_OFF), 1, 'Orientation normalised to 1');
-});
-
-test('normalizeExifSegment refreshes Exif pixel dimensions', () => {
-  const seg = buildExifSegment();
-  // ExifIFD @ tiff+38 = 48; entry0 (PixelX) value @ 48+2+8 = 58, entry1 (PixelY) value @ 58+12 = 70
-  assert.equal(readU32LE(seg, 58), 4000);
-  assert.equal(readU32LE(seg, 70), 3000);
-  const fixed = normalizeExifSegment(seg, 800, 600);
-  assert.equal(readU32LE(fixed, 58), 800, 'PixelXDimension updated');
-  assert.equal(readU32LE(fixed, 70), 600, 'PixelYDimension updated');
-});
-
-test('normalizeExifSegment does not change segment length (in-place edits)', () => {
-  const seg = buildExifSegment();
-  const fixed = normalizeExifSegment(seg, 1, 1);
-  assert.equal(fixed.length, seg.length);
-});
-
-test('spliceJpegMeta round-trips: metadata survives re-attach to a clean JPEG', () => {
+test('stripJpegMeta losslessly removes EXIF and ICC, keeps everything else', () => {
   const original = concat(SOI, buildExifSegment(), JFIF, ICC, SOS, EOI);
-  const meta = readJpegMetaSegments(original);
+  const stripped = stripJpegMeta(original);
 
-  // A freshly "canvas-encoded" output with no metadata, just JFIF + scan.
-  const encoded = concat(SOI, JFIF, SOS, EOI);
-  const merged = spliceJpegMeta(encoded, meta, 800, 600);
+  assert.ok(stripped.length < original.length, 'output shrank by the removed segments');
+  const r = readJpegMetaSegments(stripped);
+  assert.equal(r.isJpeg, true);
+  assert.equal(r.exif, null, 'EXIF removed');
+  assert.equal(r.icc.length, 0, 'ICC removed');
 
-  assert.ok(merged.length > encoded.length, 'output grew by the spliced segments');
-  // Segments must sit immediately after SOI.
-  assert.equal(merged[0], 0xFF); assert.equal(merged[1], 0xD8);
-  assert.equal(merged[2], 0xFF); assert.equal(merged[3], 0xE1);
-
-  const reread = readJpegMetaSegments(merged);
-  assert.ok(reread.exif, 'EXIF readable after splice');
-  assert.equal(reread.icc.length, 1, 'ICC readable after splice');
-  // And the re-attached EXIF carries the normalised orientation.
-  assert.equal(readU16LE(reread.exif, ORIENT_OFF), 1, 'orientation normalised in output');
+  // JFIF (APP0) and the entropy-coded scan must remain untouched.
+  assert.equal(stripped[2], 0xFF); assert.equal(stripped[3], 0xE0, 'JFIF APP0 kept right after SOI');
+  assert.equal(stripped[stripped.length - 2], 0xFF);
+  assert.equal(stripped[stripped.length - 1], 0xD9, 'EOI preserved');
 });
 
-test('spliceJpegMeta is a no-op when there is nothing to add', () => {
-  const encoded = concat(SOI, JFIF, SOS, EOI);
-  const meta = { exif: null, xmp: null, icc: [] };
-  const merged = spliceJpegMeta(encoded, meta, 100, 100);
-  assert.equal(merged, encoded, 'returns the same array reference unchanged');
+test('stripJpegMeta is a no-op on a JPEG with no metadata', () => {
+  const clean = concat(SOI, JFIF, SOS, EOI);
+  const stripped = stripJpegMeta(clean);
+  assert.deepEqual([...stripped], [...clean]);
 });
 
-test('spliceJpegMeta leaves non-JPEG output untouched', () => {
+test('stripJpegMeta leaves non-JPEG input untouched', () => {
   const notJpeg = Uint8Array.from([1, 2, 3, 4]);
-  const meta = { exif: buildExifSegment(), xmp: null, icc: [] };
-  assert.equal(spliceJpegMeta(notJpeg, meta, 10, 10), notJpeg);
+  assert.equal(stripJpegMeta(notJpeg), notJpeg);
+});
+
+test('stripJpegMeta preserves a short trailing marker (EOI) after the dropped segment', () => {
+  // SOI + APP1(EXIF) + EOI, with nothing (no SOS) after the metadata.
+  const jpeg = concat(SOI, buildExifSegment(), EOI);
+  const stripped = stripJpegMeta(jpeg);
+  assert.deepEqual([...stripped], [0xFF, 0xD8, 0xFF, 0xD9], 'SOI + EOI survive, EXIF removed');
+});
+
+test('readJpegDateTimeOriginal parses the capture date as YYYY-MM-DD', () => {
+  const jpeg = concat(SOI, buildExifWithDate('2021:07:04 12:34:56'), JFIF, SOS, EOI);
+  assert.equal(readJpegDateTimeOriginal(jpeg), '2021-07-04');
+});
+
+test('readJpegDateTimeOriginal returns null without a date tag', () => {
+  const jpeg = concat(SOI, buildExifSegment(), JFIF, SOS, EOI); // EXIF present, no DateTimeOriginal
+  assert.equal(readJpegDateTimeOriginal(jpeg), null);
+  assert.equal(readJpegDateTimeOriginal(concat(SOI, JFIF, SOS, EOI)), null);
 });
 
 test('readJpegOrientation extracts the EXIF Orientation tag', () => {
