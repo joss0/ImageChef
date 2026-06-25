@@ -20,8 +20,8 @@ const block = html.match(
 );
 assert.ok(block, 'JPEG-META-LIB block not found in index.html');
 
-const { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta } =
-  new Function(block[1] + '\nreturn { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta };')();
+const { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta, readJpegOrientation } =
+  new Function(block[1] + '\nreturn { readJpegMetaSegments, normalizeExifSegment, spliceJpegMeta, readJpegOrientation };')();
 
 // ── Synthetic JPEG builders ──────────────────────────────────────
 // A minimal, valid-enough JPEG with a hand-built little-endian EXIF block
@@ -178,4 +178,15 @@ test('spliceJpegMeta leaves non-JPEG output untouched', () => {
   const notJpeg = Uint8Array.from([1, 2, 3, 4]);
   const meta = { exif: buildExifSegment(), xmp: null, icc: [] };
   assert.equal(spliceJpegMeta(notJpeg, meta, 10, 10), notJpeg);
+});
+
+test('readJpegOrientation extracts the EXIF Orientation tag', () => {
+  const jpeg = concat(SOI, buildExifSegment(), JFIF, SOS, EOI); // fixture has Orientation = 6
+  assert.equal(readJpegOrientation(jpeg), 6);
+});
+
+test('readJpegOrientation returns null when there is no EXIF', () => {
+  const jpeg = concat(SOI, JFIF, SOS, EOI);
+  assert.equal(readJpegOrientation(jpeg), null);
+  assert.equal(readJpegOrientation(Uint8Array.from([0x89, 0x50])), null); // non-JPEG
 });

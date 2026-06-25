@@ -940,6 +940,35 @@ function normalizeExifSegment(seg, outW, outH) {
   return b;
 }
 
+// Read the EXIF Orientation value (1–8) from a JPEG's APP1 segment, or null if
+// absent. Runs on the original file bytes, before any decode, so the implicit
+// "bake to upright" step can be surfaced to the user.
+function readJpegOrientation(bytes) {
+  const meta = readJpegMetaSegments(bytes);
+  if (!meta.exif) return null;
+  const b = meta.exif;
+  const tiff = 10;
+  if (tiff + 8 > b.length) return null;
+  let le;
+  if (b[tiff] === 0x49 && b[tiff + 1] === 0x49) le = true;
+  else if (b[tiff] === 0x4D && b[tiff + 1] === 0x4D) le = false;
+  else return null;
+  const u16 = o => le ? (b[o] | (b[o + 1] << 8)) : ((b[o] << 8) | b[o + 1]);
+  const u32 = o => le
+    ? (b[o] + b[o + 1] * 256 + b[o + 2] * 65536 + b[o + 3] * 16777216)
+    : (b[o] * 16777216 + b[o + 1] * 65536 + b[o + 2] * 256 + b[o + 3]);
+  const ifd0 = tiff + u32(tiff + 4);
+  if (ifd0 < 0 || ifd0 + 2 > b.length) return null;
+  const count = u16(ifd0);
+  for (let i = 0, e = ifd0 + 2; i < count && e + 12 <= b.length; i++, e += 12) {
+    if (u16(e) === 0x0112) {
+      const v = u16(e + 8);
+      return (v >= 1 && v <= 8) ? v : null;
+    }
+  }
+  return null;
+}
+
 // Splice metadata segments into a canvas-encoded JPEG, immediately after SOI
 // (the canonical EXIF position, ahead of any JFIF APP0). Returns a new
 // Uint8Array, or the input unchanged when there is nothing to add.
@@ -1168,40 +1197,79 @@ const OP_DEFS = {
         : (config.perKB * 1024);
 
       const { blob, canvas: outCanvas } = await compressToTarget(canvas, meta.mime, targetBytes);
-      return { canvas: outCanvas, meta: { ...meta, _compressBlob: blob } };
+      const newMeta = { ...meta, _compressBlob: blob };
+      // The byte budget can only be met by dropping resolution once the quality
+      // floor is exhausted — record it so the per-file report can say so.
+      if (outCanvas.width !== canvas.width || outCanvas.height !== canvas.height) {
+        newMeta._compressShrunk = { w: outCanvas.width, h: outCanvas.height };
+      }
+      return { canvas: outCanvas, meta: newMeta };
     }
   },
 
   format: {
     name: 'Format Convert',
-    defaultConfig: { output: 'keep' },
+    defaultConfig: { output: 'keep', quality: 0.88 },
     renderUI(config, update) {
+      let cur = config;
       const div = document.createElement('div');
       div.className = 'recipe-op-body';
       div.style.display = 'flex';
       div.style.flexDirection = 'column';
       div.style.gap = '8px';
 
-      const row = document.createElement('div');
-      row.className = 'field-row';
-      const label = document.createElement('label'); label.textContent = 'Output format';
-      const sel = document.createElement('select');
-      sel.setAttribute('aria-label', 'Output format');
-      [['jpeg','JPEG'],['webp','WebP'],['png','PNG'],['keep','Keep original']].forEach(([v,t]) => {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = t;
-        if (v === config.output) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.addEventListener('change', () => update({ ...config, output: sel.value }));
-      row.appendChild(label); row.appendChild(sel);
-      div.appendChild(row);
+      function html() {
+        div.innerHTML = '';
 
-      const notice = document.createElement('div');
-      notice.className = 'notice';
-      notice.textContent = 'PNG with alpha channel is kept as PNG even when JPEG is selected.';
-      div.appendChild(notice);
+        const row = document.createElement('div');
+        row.className = 'field-row';
+        const label = document.createElement('label'); label.textContent = 'Output format';
+        const sel = document.createElement('select');
+        sel.setAttribute('aria-label', 'Output format');
+        [['jpeg','JPEG'],['webp','WebP'],['png','PNG'],['keep','Keep original']].forEach(([v,t]) => {
+          const o = document.createElement('option');
+          o.value = v; o.textContent = t;
+          if (v === cur.output) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => { cur = { ...cur, output: sel.value }; update(cur); html(); });
+        row.appendChild(label); row.appendChild(sel);
+        div.appendChild(row);
 
+        // PNG is lossless, so the quality control does not apply; everything
+        // else is (or may be) a lossy encode and gets a visible quality knob.
+        if (cur.output === 'png') {
+          const note = document.createElement('div');
+          note.className = 'notice';
+          note.textContent = 'PNG is lossless — quality N/A.';
+          div.appendChild(note);
+        } else {
+          const qRow = document.createElement('div');
+          qRow.className = 'field-row';
+          const qLabel = document.createElement('label'); qLabel.textContent = 'Quality';
+          const qInput = document.createElement('input');
+          qInput.type = 'number'; qInput.min = 1; qInput.max = 100; qInput.step = 1;
+          qInput.value = Math.round((cur.quality ?? 0.88) * 100);
+          qInput.setAttribute('aria-label', 'Encode quality (1–100)');
+          qInput.addEventListener('change', () => {
+            let v = Math.round(parseFloat(qInput.value));
+            if (!Number.isFinite(v)) v = 88;
+            v = Math.min(100, Math.max(1, v));
+            qInput.value = v;
+            update({ ...cur, quality: v / 100 });
+          });
+          const qUnit = document.createElement('span'); qUnit.className = 'unit'; qUnit.textContent = '/ 100';
+          qRow.appendChild(qLabel); qRow.appendChild(qInput); qRow.appendChild(qUnit);
+          div.appendChild(qRow);
+        }
+
+        const notice = document.createElement('div');
+        notice.className = 'notice';
+        notice.textContent = 'PNG with alpha channel is kept as PNG even when JPEG is selected. When a size-target Compress step is present, it overrides this quality to hit the byte budget.';
+        div.appendChild(notice);
+      }
+
+      html();
       return div;
     },
     async apply(canvas, meta, config) {
@@ -1219,8 +1287,11 @@ const OP_DEFS = {
         mime = 'image/png';
       }
 
+      // Surface the user-chosen encode quality so canvasToBlob stops using the
+      // invisible 0.88 fallback. PNG ignores it; a size-target Compress step
+      // overrides it later via its own search.
+      const newMeta = { ...meta, mime, quality: config.quality };
       // If mime changed invalidate any cached compress blob
-      const newMeta = { ...meta, mime };
       if (mime !== meta.mime) delete newMeta._compressBlob;
       return { canvas, meta: newMeta };
     }
@@ -1856,6 +1927,13 @@ async function loadThumbAndDims(entry) {
     const ext = extOf(entry.name);
     let blob = entry.file;
 
+    // Detect EXIF orientation from the original bytes so the (otherwise silent)
+    // bake-to-upright step is visible per file.
+    if (ext === 'jpg' || ext === 'jpeg') {
+      try { entry.orientation = readJpegOrientation(new Uint8Array(await entry.file.arrayBuffer())); }
+      catch { entry.orientation = null; }
+    }
+
     if (ext === 'heic' || ext === 'heif') {
       await ensureHeic2any();
       let converted = await heic2any({ blob: entry.file, toType: 'image/jpeg', quality: 0.75 });
@@ -2007,6 +2085,11 @@ function updateRowThumb(entry) {
   }
 }
 
+const ORIENTATION_LABELS = {
+  1: 'normal', 2: 'mirrored', 3: 'rotate 180°', 4: 'mirrored + 180°',
+  5: 'mirrored + 90° CW', 6: 'rotate 90° CW', 7: 'mirrored + 270° CW', 8: 'rotate 270° CW',
+};
+
 function updateRowDims(entry) {
   const el = document.getElementById('dims-' + entry.id);
   if (!el) return;
@@ -2016,6 +2099,19 @@ function updateRowDims(entry) {
       s += ' → ' + entry.outDims.w + '×' + entry.outDims.h;
     }
     el.textContent = s;
+    if (entry.orientation && entry.orientation !== 1) {
+      const o = document.createElement('small');
+      o.style.cssText = 'display:block;color:var(--text-dim)';
+      o.textContent = 'EXIF orientation ' + entry.orientation +
+        ' (' + (ORIENTATION_LABELS[entry.orientation] || 'unknown') + ')';
+      el.appendChild(o);
+    }
+    if (entry.compressNote) {
+      const c = document.createElement('small');
+      c.style.cssText = 'display:block;color:var(--warning)';
+      c.textContent = entry.compressNote;
+      el.appendChild(c);
+    }
   }
 }
 
@@ -2121,7 +2217,9 @@ async function decodeToImageBitmap(entry) {
       const img = await new Promise((res, rej) => {
         const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url;
       });
-      const bmp = await createImageBitmap(img, { resizeQuality: 'high' });
+      // imageOrientation pinned explicitly: the default was 'none' on older
+      // engines, so leaving it implicit silently produced sideways output there.
+      const bmp = await createImageBitmap(img, { resizeQuality: 'high', imageOrientation: 'from-image' });
       URL.revokeObjectURL(url);
       return { bitmap: bmp, ext };
     } catch (e) {
@@ -2131,14 +2229,14 @@ async function decodeToImageBitmap(entry) {
   }
 
   try {
-    const bmp = await createImageBitmap(blob, { resizeQuality: 'high' });
+    const bmp = await createImageBitmap(blob, { resizeQuality: 'high', imageOrientation: 'from-image' });
     return { bitmap: bmp, ext };
   } catch {
     const url = URL.createObjectURL(blob);
     const img = await new Promise((res, rej) => {
       const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode failed')); i.src = url;
     });
-    const bmp = await createImageBitmap(img);
+    const bmp = await createImageBitmap(img, { imageOrientation: 'from-image' });
     URL.revokeObjectURL(url);
     return { bitmap: bmp, ext };
   }
@@ -2176,6 +2274,11 @@ async function processEntry(entry, recipe, index, perFileBudget) {
     const { canvas: outCanvas, meta: outMeta } = await applyRecipe(initCanvas, initMeta, recipe);
 
     entry.outDims = { w: outCanvas.width, h: outCanvas.height };
+
+    // Surface when Compress had to drop resolution to meet the byte budget.
+    entry.compressNote = outMeta._compressShrunk
+      ? `downscaled to ${outMeta._compressShrunk.w}×${outMeta._compressShrunk.h} to meet the size budget`
+      : null;
 
     // Use pre-built blob from compress op when available (avoids double encode)
     if (outMeta._compressBlob && outMeta.mime !== 'image/png') {
