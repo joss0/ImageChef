@@ -1,0 +1,8 @@
+{
+  "name": "imagechef",
+  "private": true,
+  "description": "Client-side image batch processor",
+  "scripts": {
+    "test": "node --test"
+  }
+}
