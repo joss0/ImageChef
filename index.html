@@ -490,7 +490,11 @@
     width: 100%; height: 100%;
   }
   .preview-half img {
-    max-width: 100%; max-height: 60vh;
+    /* Fill the (equal-sized) viewport and contain, so the before/after panes
+       display at identical scale and position regardless of each image's pixel
+       dimensions — a downscaled "after" is shown enlarged to match the original
+       rather than shrinking out of alignment under the shared zoom transform. */
+    width: 100%; height: 100%; object-fit: contain;
     display: block; pointer-events: none;
   }
   .preview-zoom-controls {
@@ -1331,7 +1335,7 @@ const OP_DEFS = {
       div.className = 'recipe-op-body';
       const notice = document.createElement('div');
       notice.className = 'notice';
-      notice.textContent = 'Metadata (EXIF/XMP/ICC) only survives a pure JPEG→JPEG passthrough — a recipe with no pixel-changing op (resize, rotate, grayscale, integer scale, compress) and no format change. With this step present, it is removed even in that case (losslessly, without re-encoding). Any pixel-changing op or format change re-encodes the image and drops metadata regardless of this step.';
+      notice.textContent = 'Metadata (EXIF/XMP/ICC) only survives a pure JPEG→JPEG passthrough — a recipe with no pixel-changing op (resize, rotate, grayscale, integer scale, compress) and no Format Convert step. With this step present, it is removed even in that case (losslessly, without re-encoding). Any pixel-changing op or a Format Convert step re-encodes the image and drops metadata regardless of this step.';
       div.appendChild(notice);
       return div;
     },
@@ -2386,13 +2390,17 @@ async function processEntry(entry, recipe, index, perFileBudget) {
       : null;
 
     // Output + metadata contract. Metadata survives ONLY on a pure passthrough:
-    // JPEG source, JPEG output, zero pixel-mutating ops, no format change. Any
-    // other recipe re-encodes the pixels through canvas, which drops metadata —
-    // we never splice it back (that double-applies orientation and mislabels the
-    // colour space).
+    // JPEG source, JPEG output, and a recipe that asks for no re-encode at all.
+    // An enabled Format Convert step is an explicit encode directive (it carries
+    // a quality control), so it forces a re-encode even when the output stays
+    // JPEG — otherwise that quality would be silently ignored and the file would
+    // pass through untouched. Re-encoding drops metadata; we never splice it back
+    // (that double-applies orientation and mislabels the colour space).
     entry.metaNote = null;
     const srcIsJpeg = /^jpe?g$/.test(extOf(entry.name));
+    const formatEnabled = recipe.some(s => s.enabled && s.op === 'format');
     const pixelMutated = recipe.some(s => s.enabled && PIXEL_MUTATING_OPS.has(s.op))
+      || formatEnabled
       || outMeta.mime !== 'image/jpeg';
     const stripEnabled = recipe.some(s => s.enabled && s.op === 'strip');
 
