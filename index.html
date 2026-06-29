@@ -2827,8 +2827,13 @@ folderInput.addEventListener('change', () => {
 });
 
 function isFileDrag(e) {
-  // Recipe op reorders use dataTransfer with no Files — only file system drops have 'Files' type
-  return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files');
+  // Recipe op reorders use dataTransfer with no Files — only file system drops have 'Files' type.
+  // The drag-to-attach ZIP card is itself a file drag, but it is destined for another window; its
+  // marker type tells us to ignore it here so it doesn't trigger import / drop-zone highlighting.
+  const types = e.dataTransfer && e.dataTransfer.types;
+  if (!types || !types.includes('Files')) return false;
+  if (types.includes('application/x-imagechef-zip')) return false;
+  return true;
 }
 
 async function handleDroppedFiles(fileList) {
@@ -3039,10 +3044,18 @@ zipNameInput.addEventListener('change', saveRecipeToHash);
   saveBtn.addEventListener('click', e => { e.stopPropagation(); doDownload(); });
 
   card.addEventListener('dragstart', e => {
-    if (!zipFile) { e.preventDefault(); return; }
-    // items.add(File) is the only writable path; dataTransfer.files is read-only.
-    e.dataTransfer.items.add(zipFile);
-    e.dataTransfer.effectAllowed = 'copy';
+    if (!zipFile || !zipUrl) { e.preventDefault(); return; }
+    const dt = e.dataTransfer;
+    dt.effectAllowed = 'copy';
+    // Marker so ImageChef's OWN import drop zones ignore this drag (otherwise
+    // dragging the card across the window lights up / re-imports into the app).
+    dt.setData('application/x-imagechef-zip', '1');
+    // DownloadURL is the Chromium mechanism for dragging a generated blob OUT as
+    // a real file (to Gmail, the desktop, etc.). Format: mime:filename:url.
+    // items.add(File) alone often degrades to dropping just the filename text.
+    dt.setData('DownloadURL', `application/zip:${zipName}:${zipUrl}`);
+    // Also expose the File for in-page targets that read items/files directly.
+    try { dt.items.add(zipFile); } catch { /* some engines reject File adds */ }
     card.classList.add('dragging');
   });
   card.addEventListener('dragend', () => card.classList.remove('dragging'));
