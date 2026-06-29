@@ -2816,7 +2816,9 @@ dropZone.addEventListener('click', e => { if (e.target === dropZone || e.target.
 dropZone.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
 
 fileInput.addEventListener('change', () => {
-  if (fileInput.files.length) addFiles(fileInput.files);
+  // Route through handleDroppedFiles so a ZIP chosen from the dialog is
+  // extracted (the accept list includes .zip), matching the drop behaviour.
+  if (fileInput.files.length) handleDroppedFiles(fileInput.files);
   fileInput.value = '';
 });
 
@@ -2830,10 +2832,14 @@ function isFileDrag(e) {
   // Recipe op reorders use dataTransfer with no Files — only file system drops have 'Files' type.
   // The drag-to-attach ZIP card is itself a file drag, but it is destined for another window; its
   // marker type tells us to ignore it here so it doesn't trigger import / drop-zone highlighting.
+  // dataTransfer.types may be a plain Array (Chrome/FF) or a DOMStringList (Safari) — calling
+  // .includes on a DOMStringList throws, which previously broke all drag-and-drop on those engines.
   const types = e.dataTransfer && e.dataTransfer.types;
-  if (!types || !types.includes('Files')) return false;
-  if (types.includes('application/x-imagechef-zip')) return false;
-  return true;
+  if (!types) return false;
+  const has = v => typeof types.includes === 'function' ? types.includes(v)
+                 : typeof types.contains === 'function' ? types.contains(v)
+                 : Array.prototype.indexOf.call(types, v) >= 0;
+  return has('Files') && !has('application/x-imagechef-zip');
 }
 
 async function handleDroppedFiles(fileList) {
