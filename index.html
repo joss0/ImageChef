@@ -537,6 +537,90 @@
     color: var(--warning);
     display: block;
   }
+  /* ── ZIP drag-to-attach component ── */
+  .zip-attach { position: relative; display: inline-flex; }
+  #downloadZipBtn.zip-active { box-shadow: 0 0 0 2px var(--accent2); }
+  .zip-pop {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    z-index: 60;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+  }
+  .zip-pop[hidden] { display: none; }
+  .zip-pop-dismiss {
+    position: absolute; top: 3px; right: 5px;
+    background: none; border: none; color: var(--text-dim);
+    font-size: 0.8rem; line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 3px;
+  }
+  .zip-pop-dismiss:hover { color: var(--accent); background: rgba(233,69,96,0.15); filter: none; transform: none; }
+  .zip-pop-body { display: flex; align-items: center; gap: 14px; }
+  .zip-drag-col { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .zip-drag-label { font-size: 0.62rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  /* file card with a folded top-right corner */
+  .zip-card {
+    position: relative;
+    width: 78px; height: 62px;
+    background: linear-gradient(155deg, var(--surface) 0%, var(--surface2) 100%);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 3px;
+    cursor: grab;
+    user-select: none;
+    /* layered elevation: tight depth shadow + diffuse lift */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.18), 0 6px 16px rgba(0,0,0,0.12);
+    animation: zipFloat 2s ease-in-out infinite;
+  }
+  .zip-card:hover { border-color: var(--accent2); }
+  .zip-card:active {
+    cursor: grabbing;
+    transform: translateY(2px);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.22);
+    animation: none;
+  }
+  .zip-card.dragging { opacity: 0.5; animation: none; }
+  /* folded corner: a triangle in the page/panel colour carving out the corner,
+     plus a smaller darker flap for the fold detail */
+  .zip-card-corner {
+    position: absolute; top: -1px; right: -1px;
+    width: 0; height: 0;
+    border-top: 16px solid var(--panel);
+    border-left: 16px solid transparent;
+  }
+  .zip-card-corner::after {
+    content: ''; position: absolute; top: 0; right: 0;
+    width: 0; height: 0;
+    border-top: 11px solid var(--border);
+    border-left: 11px solid transparent;
+  }
+  .zip-card-badge {
+    background: var(--accent2); color: #fff;
+    font-size: 0.6rem; font-weight: 700; letter-spacing: 1px;
+    padding: 1px 6px; border-radius: 8px;
+  }
+  .zip-card-name {
+    max-width: 70px;
+    font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+    font-size: 0.55rem; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .zip-save { font-size: 0.78rem; padding: 6px 12px; white-space: nowrap; }
+  /* split-open: children fade/scale in from below, drag handle first */
+  .zip-pop .zip-drag-col, .zip-pop .zip-save { opacity: 0; transform: translateY(8px); }
+  .zip-pop.open .zip-drag-col { animation: zipIn 0.22s ease both; }
+  .zip-pop.open .zip-save { animation: zipIn 0.22s ease 0.06s both; }
+  @keyframes zipFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  @keyframes zipIn { from { opacity: 0; transform: translateY(8px) scale(0.96); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .zip-card { animation: none; }
+    .zip-pop .zip-drag-col, .zip-pop .zip-save { transition: none; }
+    .zip-pop.open .zip-drag-col, .zip-pop.open .zip-save { animation: none; opacity: 1; transform: none; }
+  }
 </style>
 </head>
 <body>
@@ -2536,9 +2620,12 @@ function assignUniqueOutputNames(entries) {
 // ═══════════════════════════════════════════════════════════════
 // Download
 // ═══════════════════════════════════════════════════════════════
-async function downloadZip() {
+// Builds the output ZIP archive and resolves to a Blob. This is the shared
+// black-box zip-generation path used by both the download and drag-to-attach
+// flows — its logic is unchanged from the original downloadZip().
+async function buildZipBlob() {
   const done = state.files.filter(e => e.status === 'done' && e.outBlob);
-  if (!done.length) return;
+  if (!done.length) throw new Error('No processed images to zip');
   // Ensure unique names exist (bake assigns them; guard in case of direct call)
   // and emit in stable name order so the archive is byte-reproducible.
   if (done.some(e => !e.finalName)) assignUniqueOutputNames(done);
@@ -2546,29 +2633,23 @@ async function downloadZip() {
     const an = a.finalName || a.name, bn = b.finalName || b.name;
     return an < bn ? -1 : an > bn ? 1 : 0;
   });
-  downloadZipBtn.disabled = true;
-  downloadZipBtn.textContent = '⏳ Zipping…';
-  try {
-    const zip = new JSZip();
-    for (const entry of done) {
-      zip.file(entry.finalName || entry.outName || entry.name, entry.outBlob, { compression: 'STORE' });
-    }
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const today = new Date();
-    const dateStr = today.getFullYear()
-      + '-' + String(today.getMonth() + 1).padStart(2, '0')
-      + '-' + String(today.getDate()).padStart(2, '0');
-    const rawName = (document.getElementById('zipNameInput').value.trim() || 'imagechef_{date}')
-      .replace(/{date}/g, dateStr);
-    const zipName = rawName.endsWith('.zip') ? rawName : rawName + '.zip';
-    triggerDownload(zipBlob, zipName);
-  } catch (e) {
-    console.error('ZIP failed', e);
-    alert('ZIP creation failed: ' + e.message);
-  } finally {
-    downloadZipBtn.disabled = false;
-    downloadZipBtn.textContent = '⬇ ZIP';
+  const zip = new JSZip();
+  for (const entry of done) {
+    zip.file(entry.finalName || entry.outName || entry.name, entry.outBlob, { compression: 'STORE' });
   }
+  return zip.generateAsync({ type: 'blob' });
+}
+
+// Resolves the configured output filename (applies the {date} token and the
+// .zip extension), used for both the download name and the dragged File.
+function computeZipFilename() {
+  const today = new Date();
+  const dateStr = today.getFullYear()
+    + '-' + String(today.getMonth() + 1).padStart(2, '0')
+    + '-' + String(today.getDate()).padStart(2, '0');
+  const rawName = (document.getElementById('zipNameInput').value.trim() || 'imagechef_{date}')
+    .replace(/{date}/g, dateStr);
+  return rawName.endsWith('.zip') ? rawName : rawName + '.zip';
 }
 
 async function downloadIndividually() {
@@ -2813,12 +2894,164 @@ document.querySelector('.right-panel').addEventListener('drop', async e => {
 });
 
 bakeBtn.addEventListener('click', bake);
-downloadZipBtn.addEventListener('click', downloadZip);
+// #downloadZipBtn click is owned by the drag-to-attach component (setupZipAttach).
 downloadIndivBtn.addEventListener('click', downloadIndividually);
 
 const zipNameInput = document.getElementById('zipNameInput');
 attachFilenameSanitizer(zipNameInput);
 zipNameInput.addEventListener('change', saveRecipeToHash);
+
+// ═══════════════════════════════════════════════════════════════
+// ZIP drag-to-attach component (idle → building → ready)
+//
+// Wraps the existing #downloadZipBtn in place. Fully self-contained: all state,
+// element refs and listeners are local to this IIFE — nothing leaks out and the
+// rest of the app never calls into it. Uses buildZipBlob() as an opaque
+// Promise<Blob> source.
+// ═══════════════════════════════════════════════════════════════
+(function setupZipAttach() {
+  const btn = document.getElementById('downloadZipBtn');
+  if (!btn) return;
+
+  // Can this engine attach a File to a cross-window drag? Firefox cannot, so we
+  // probe once and fall back to a plain download there.
+  const CAN_DRAG_FILES = (() => {
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(new File([''], 'test'));
+      return dt.items.length === 1;
+    } catch { return false; }
+  })();
+
+  // Wrap the button so the ready-state popover anchors to it without pushing any
+  // surrounding layout (the button keeps its slot in the button row).
+  const wrap = document.createElement('span');
+  wrap.className = 'zip-attach';
+  btn.parentNode.insertBefore(wrap, btn);
+  wrap.appendChild(btn);
+
+  const pop = document.createElement('div');
+  pop.className = 'zip-pop';
+  pop.hidden = true;
+  pop.innerHTML =
+    '<button class="zip-pop-dismiss" type="button" aria-label="Cancel">✕</button>' +
+    '<div class="zip-pop-body">' +
+      '<div class="zip-drag-col">' +
+        '<div class="zip-card" draggable="true" role="button" tabindex="0" aria-label="Drag this ZIP to attach it">' +
+          '<span class="zip-card-corner"></span>' +
+          '<span class="zip-card-badge">ZIP</span>' +
+          '<span class="zip-card-name"></span>' +
+        '</div>' +
+        '<span class="zip-drag-label">drag to attach</span>' +
+      '</div>' +
+      '<button class="zip-save btn-secondary" type="button"><span aria-hidden="true">⬇</span> save</button>' +
+    '</div>';
+  wrap.appendChild(pop);
+
+  const card = pop.querySelector('.zip-card');
+  const cardName = pop.querySelector('.zip-card-name');
+  const saveBtn = pop.querySelector('.zip-save');
+  const dismissBtn = pop.querySelector('.zip-pop-dismiss');
+
+  // Component-local state — not global, not reachable from outside.
+  let compState = 'idle';
+  let zipFile = null, zipUrl = null, zipName = '';
+
+  function releaseBlob() {
+    if (zipUrl) URL.revokeObjectURL(zipUrl);
+    zipFile = null; zipUrl = null; zipName = '';
+  }
+
+  function toIdle() {
+    compState = 'idle';
+    pop.hidden = true;
+    pop.classList.remove('open');
+    btn.classList.remove('zip-active');
+    btn.innerHTML = '⬇ ZIP';
+    // Re-enable only if there is something to zip (mirrors bake()'s logic).
+    btn.disabled = !state.files.some(e => e.status === 'done' && e.outBlob);
+    releaseBlob();
+  }
+
+  function toBuilding() {
+    compState = 'building';
+    pop.hidden = true;
+    btn.classList.add('zip-building');
+    btn.disabled = true;
+    btn.innerHTML = '⏳ ZIP…';
+  }
+
+  function toReady() {
+    compState = 'ready';
+    cardName.textContent = zipName;
+    btn.classList.remove('zip-building');
+    btn.classList.add('zip-active');
+    btn.disabled = false;
+    btn.innerHTML = '⬇ ZIP';
+    pop.hidden = false;
+    // Restart the staggered enter animation.
+    pop.classList.remove('open');
+    void pop.offsetWidth;
+    pop.classList.add('open');
+  }
+
+  function doDownload() {
+    if (!zipUrl) return;
+    const a = document.createElement('a');
+    a.href = zipUrl;
+    a.download = zipName;
+    a.click();
+  }
+
+  async function startBuild() {
+    releaseBlob(); // drop any previous cycle's blob/url before starting a new one
+    toBuilding();
+    let blob;
+    try {
+      blob = await buildZipBlob();
+    } catch (e) {
+      console.error('ZIP failed', e);
+      alert('ZIP creation failed: ' + (e && e.message ? e.message : e));
+      btn.classList.remove('zip-building');
+      toIdle();
+      return;
+    }
+    zipName = computeZipFilename();
+    zipFile = new File([blob], zipName, { type: 'application/zip' }); // built once, here
+    zipUrl = URL.createObjectURL(blob);                              // created once, here
+    btn.classList.remove('zip-building');
+    if (!CAN_DRAG_FILES) {
+      // Firefox: no cross-window file drag — behave like the old download button.
+      doDownload();
+      toIdle();
+      return;
+    }
+    toReady();
+  }
+
+  btn.addEventListener('click', () => {
+    if (compState === 'building') return;
+    if (compState === 'ready') { toIdle(); }   // clicking ZIP again dismisses…
+    startBuild();                               // …and restarts cleanly
+  });
+
+  dismissBtn.addEventListener('click', e => { e.stopPropagation(); toIdle(); });
+  saveBtn.addEventListener('click', e => { e.stopPropagation(); doDownload(); });
+
+  card.addEventListener('dragstart', e => {
+    if (!zipFile) { e.preventDefault(); return; }
+    // items.add(File) is the only writable path; dataTransfer.files is read-only.
+    e.dataTransfer.items.add(zipFile);
+    e.dataTransfer.effectAllowed = 'copy';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => card.classList.remove('dragging'));
+
+  // Starting a new bake invalidates any prepared ZIP — collapse back to idle.
+  // (Observing the bake button keeps this component self-contained; bake() never
+  // reaches in here.)
+  bakeBtn.addEventListener('click', () => { if (compState !== 'idle') toIdle(); });
+})();
 
 clearFilesBtn.addEventListener('click', () => {
   for (const e of state.files) {
