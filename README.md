@@ -2,59 +2,133 @@
 
 **Client-side batch image processor — nothing leaves your browser.**
 
-ImageChef is a single-page tool for batch-processing images entirely in your browser. Drop a folder of photos, build a recipe of operations, hit Bake, and download the results as a ZIP. No server, no uploads, no accounts.
+ImageChef turns a batch of images into a trustworthy, deterministic pipeline
+run: tune a recipe once on one exemplar image, then apply it unchanged to
+hundreds of images. No server, no uploads, no accounts.
 
-## Features
+Read [`ImageChef.md`](./ImageChef.md) for what the tool is (and deliberately
+is not), and [`ImageChef-design-brief.md`](./ImageChef-design-brief.md) for
+the implementation spec and acceptance tests. This README is the practical
+summary; those two are the source of truth.
 
-- **Resize** — fit within max W×H, exact dimensions, percentage scale, or longest-edge cap
-- **Compress** — binary-search compression to hit a per-image size cap or a total batch budget (e.g. "whole batch ≤ 20 MB" for email)
-- **Format convert** — output as JPEG, WebP, or PNG; or keep the original format (alpha-channel images are automatically promoted to PNG when converting to JPEG)
-- **Strip metadata** — EXIF/GPS is dropped on re-encode; surfaced as an explicit recipe step so you know it happened
-- **Rename** — pattern-based rename with `{name}`, `{index}`, `{width}x{height}`, `{date}` tokens
-- **Rotate / Flip** — rotate 90°/180°/270° and flip horizontally or vertically
-- **Grayscale** — luminance (BT.601) or average method
-- **Remove Duplicates** — skip duplicate files during bake, matched by name+size or name only; duplicates are flagged in the status column rather than silently dropped
-- **Email preset** — one click to configure longest-edge 1600 px + total budget 20 MB + JPEG output
-- **Before/after preview** — side-by-side comparison with synchronized zoom (scroll) and pan (drag)
-- **Per-file remove** — remove individual files from the list with the ✕ button on each row; "Clear all" still available for the full list
-- **Light & dark themes** — System / Light / Dark selector, defaulting to System (follows OS preference live); an explicit choice is remembered across visits
-- **Recipe sharing via URL hash** — the recipe, ZIP name, and rename pattern are stored in the URL hash; bookmarking or sharing the link restores your setup
+## The model
+
+A recipe is a **record**, not a list — up to nine named, optional fields
+(`orient`, `resize`, `sharpen`, `stamp`, `flatten`, `color`, `metadata`,
+`encode`, `manifest`). There is no operation list, no drag-to-reorder, no
+per-op enable toggle. The engine runs one fixed pipeline:
+
+```
+decode → orient → resize → sharpen → stamp → flatten → color → metadata → encode
+```
+
+Two recipes with the same fields in a different key order are the same
+recipe, because the engine reads each slot by name rather than iterating
+over whatever order the fields happen to be in.
+
+## Modes
+
+- **Audit** — reads every loaded file's dimensions, format, color-profile
+  signal, and metadata inventory (flagging GPS/PII). No pixels are modified.
+- **Calibrate** — pick one exemplar image, tune every slot with full
+  instruments (worst-region loupe, metadata diff table, before/after resize
+  thumbnail), and produce the recipe. The encode slot's "quality" control
+  is a calibration instrument only — what gets saved is the **achieved SSIM**
+  against the pre-encode raster, not the quality number.
+- **Process** — runs the saved recipe over the whole batch. Each image
+  binary-searches encoder quality to hit the calibrated SSIM target subject
+  to an optional byte cap; a conflict between the two is reported by name,
+  not silently resolved, and the run continues for the rest of the batch.
+  Output is a ZIP (optionally with a `manifest.json` built by the same report
+  generator Audit uses).
+
+## Notable behavior
+
+- **Orientation** is one of 8 states (the D4 group — same as EXIF
+  orientation), composed from the image's own EXIF tag and any rotate/flip
+  taps during calibration into a single transform applied once.
+- **Resize** intents are `fit`, `cover`, and `exact-pad` — named, not
+  user-assembled compose-your-own scale+crop. Resampling happens in linear
+  light on premultiplied alpha, so a transparent neighbor never drags an
+  opaque edge toward black.
+- **Metadata** defaults to strip-all, including the color-space tag the
+  browser's own encoder embeds regardless of what was asked for. Retaining
+  copyright/artist/description/capture-date is opt-in and by name; GPS is
+  never retainable through this mechanism, even opt-in.
+- **Determinism**: the same input set and recipe produce a byte-identical
+  ZIP on repeat runs — `{date}` and `{hash:8}` stamp tokens are frozen at
+  Save Recipe / read from file content, never wall-clock at Process time.
 
 ## Supported input formats
 
-JPEG, PNG, WebP, BMP, GIF (first frame), HEIC/HEIF, ZIP archives of images
+JPEG, PNG, WebP, BMP, GIF (first frame), and ZIP archives of the above.
 
 ## Usage
 
-1. Open `index.html` in any modern browser — no install, no build step
-2. Drop images, a folder, or a ZIP archive onto the drop zone (or click to browse / use the 📁 Pick files button)
-3. Build a recipe in the left panel: add operations, configure each one, drag to reorder
-4. Click **🍳 Bake!**
-5. Download results as a **ZIP** or individually
+1. Open `index.html` in any modern browser — no install, no build step.
+2. Drop images, a folder, or a ZIP archive onto the drop zone.
+3. **Audit** the set, or go straight to **Calibrate**: pick an exemplar,
+   tune the slots you need, click **Save Recipe**.
+4. In **Process**, click **Run Batch**, then **Download ZIP**.
 
 ## Architecture
 
-ImageChef is a single self-contained `index.html` file — all CSS and JavaScript are inline. External dependencies:
+Single self-contained `index.html` — all CSS and JavaScript inline, no
+build step, no framework. One dependency:
 
-- [JSZip](https://stashofcode.fr/jszip/) — ZIP creation and extraction, loaded via CDN with an SRI hash
-- [heic2any](https://alexcorvi.github.io/heic2any/) — HEIC/HEIF decoding via WASM, lazily loaded on first use
+- [fflate](https://github.com/101arrowz/fflate) (MIT) — ZIP read/write,
+  vendored inline. Nothing is fetched over the network at runtime.
 
-All image processing uses native browser APIs (`createImageBitmap`, `canvas`, `canvas.toBlob`). A concurrency pool of 3 workers processes files in parallel without saturating RAM on large batches.
+All image processing uses native browser APIs (`createImageBitmap`, canvas,
+`canvas.toBlob`) plus a from-scratch linear-light premultiplied resampler
+and a block-based SSIM/SAD implementation (not a full reference SSIM —
+non-overlapping 8×8 blocks, the same granularity the worst-region loupe
+uses).
 
 **Privacy:** images never leave the device. There is no backend.
+
+### Known scope cuts (deliberate, not oversights)
+
+- **HEIC/HEIF input** was dropped along with it — supporting it previously
+  required a second CDN-loaded dependency (`heic2any`), which conflicts with
+  "fflate is the one permitted dependency."
+- **WebP metadata retention** isn't implemented — RIFF chunk surgery for
+  WebP's metadata layout was judged not worth the complexity given JPEG and
+  PNG cover the common cases. WebP output always strips metadata.
+- **Full ICC profile embedding** is out of scope. The `color` slot's job is
+  reduced to: confirm/record sRGB output and decide whether to strip the
+  color-space tag the browser encoder adds on its own. It does not embed a
+  custom ICC profile blob.
+- **GPS is never retainable** via the metadata slot, even opt-in — Audit
+  still flags its presence on source files, but the retain-list can't be
+  used to carry location data into output.
+
+## Tests
+
+```
+npm test
+```
+
+Runs `node --test` over `tests/*.test.mjs`. The DOM-free engine internals
+(D4 orientation composition, recipe canonicalization, the linear-premultiplied
+resampler, block SSIM/SAD, the minimal EXIF/PNG metadata writers) are
+extracted straight out of `index.html` between `ENGINE-LIB` / `JPEG-META-LIB`
+sentinel comments and unit-tested directly, so the shipped code is what's
+under test.
 
 ## Deployment
 
 Drop `index.html` anywhere that serves static files:
 
-- **Cloudflare Pages** — push to a repo, done
-- **Any static host** — single file, no dependencies to install
-- **Locally** — open the file directly in a browser (`file://` works for most features; folder drag-and-drop and OS dark-mode detection may require a server origin in some browsers)
+- **Cloudflare Pages** — push to a repo, done.
+- **Any static host** — single file, no dependencies to install.
+- **Locally** — open the file directly in a browser. `file://` works for
+  most features; folder drag-and-drop may require a server origin in some
+  browsers.
 
 ## Browser support
 
-Any modern browser with `createImageBitmap` support (Chrome 69+, Firefox 105+, Safari 16.4+). HEIC input requires a network connection on first use to load the WASM decoder.
-
-## Roadmap
-
-Crop/pad to aspect ratio · watermark overlay · AVIF output · PWA/offline mode
+Any modern browser with `createImageBitmap` support (Chrome 69+, Firefox
+105+, Safari 16.4+). `crypto.subtle` (used for the `{hash:8}` stamp token
+and manifest content hashes) requires a secure context — `https://` or
+`localhost`; some `file://` origins may not provide it.
