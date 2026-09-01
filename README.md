@@ -58,6 +58,12 @@ over whatever order the fields happen to be in.
 - **Determinism**: the same input set and recipe produce a byte-identical
   ZIP on repeat runs — `{date}` and `{hash:8}` stamp tokens are frozen at
   Save Recipe / read from file content, never wall-clock at Process time.
+- **Image Inspector**: a zoom/pan viewer for eyeballing full images, not just
+  the worst-region loupe's crop — click a file's thumbnail at import time,
+  "View full image" during Calibrate, or "Inspect" on a Process result. Where
+  a region of interest is known (the worst-error 8×8 block), it's marked on
+  the full image with a pulsing, periodically shining highlight, so it's
+  findable before you zoom in.
 
 ## Supported input formats
 
