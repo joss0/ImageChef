@@ -76,6 +76,14 @@ over whatever order the fields happen to be in.
 - **Exemplar selection**: clicking a file in the left-hand list (its
   thumbnail included) sets it as the Calibrate exemplar, kept in sync with
   the "Tune on" dropdown — no need to hunt for it by name in a list.
+- **Old recipe bookmarks still work.** A link saved under the pre-rework,
+  CyberChef-style ordered op list (see `imagechef-outline.md`) is detected
+  and migrated: rotate/flip, a fixed-size or longest-edge resize, a
+  per-image byte cap, and jpeg/png/webp format all carry over exactly. What
+  has no equivalent in the fixed pipeline — a percent resize (relative to
+  each image, not a fixed box), a total-batch byte budget, "keep original"
+  format, custom output filenames, grayscale — is named in an on-screen
+  notice rather than silently dropped or guessed at.
 
 ## Supported input formats
 
