@@ -158,13 +158,13 @@ test('normalizeBlockLoss returns null with no blocks or no loss', () => {
   assert.equal(normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 0 }]), null);
 });
 
-test('normalizeBlockLoss scales every block relative to the batch max, capped at maxAlpha', () => {
+test('normalizeBlockLoss scales every block relative to the batch max, capped at maxAlpha (gamma=1, linear)', () => {
   const blocks = [
     { x: 0, y: 0, w: 8, h: 8, sad: 100 },  // the max — should hit maxAlpha exactly
-    { x: 8, y: 0, w: 8, h: 8, sad: 50 },   // half the max — half the alpha
+    { x: 8, y: 0, w: 8, h: 8, sad: 50 },   // half the max — half the alpha, at gamma=1
     { x: 0, y: 8, w: 8, h: 8, sad: 0 },    // no loss — zero alpha, not dropped
   ];
-  const out = normalizeBlockLoss(blocks, 0.8);
+  const out = normalizeBlockLoss(blocks, 0.8, 1);
   assert.equal(out.length, 3);
   assert.equal(out[0].alpha, 0.8);
   assert.equal(out[1].alpha, 0.4);
@@ -177,6 +177,25 @@ test('normalizeBlockLoss defaults maxAlpha so the mask never fully obscures the 
   const out = normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 1 }]);
   assert.equal(out[0].alpha, 0.85);
   assert.ok(out[0].alpha < 1);
+});
+
+test('normalizeBlockLoss biases through a power law: moderate loss is suppressed well below linear, the max is untouched', () => {
+  const blocks = [
+    { x: 0, y: 0, w: 8, h: 8, sad: 100 },
+    { x: 8, y: 0, w: 8, h: 8, sad: 50 }, // half the max SAD
+  ];
+  const linear = normalizeBlockLoss(blocks, 0.8, 1);
+  const gamma2 = normalizeBlockLoss(blocks, 0.8, 2);
+  // The worst block always hits maxAlpha regardless of gamma (1^g === 1).
+  assert.equal(linear[0].alpha, 0.8);
+  assert.equal(gamma2[0].alpha, 0.8);
+  // A gamma > 1 pulls the half-max block's tint down, not up — that's what
+  // keeps ordinary, moderate compression loss from washing the image green.
+  assert.ok(gamma2[1].alpha < linear[1].alpha);
+  assert.equal(gamma2[1].alpha, 0.5 ** 2 * 0.8);
+  // The library default (gamma=2.2) suppresses it further still.
+  const defaulted = normalizeBlockLoss(blocks, 0.8);
+  assert.ok(defaulted[1].alpha < gamma2[1].alpha);
 });
 
 test('normalizeBlockLoss on real computeBlockStats output: the worst block reaches maxAlpha', () => {

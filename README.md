@@ -64,8 +64,15 @@ over whatever order the fields happen to be in.
   result. The comparison is always the source file as imported against the
   actual fully-processed result, never an intermediate pipeline step. Where
   loss is known (every block's error, not just the single worst one), it's
-  marked on the final image as a normalized heatmap that breathes and
-  periodically shines, so the lossy regions are findable before you zoom in.
+  marked on the final image as a normalized heatmap, power-law biased so
+  ordinary moderate loss doesn't wash the image in tint — only the
+  genuinely worst regions stay strongly marked. The unaffected image is
+  what you see almost all the time; the mask only flashes on for about
+  half a second every three seconds, so it's findable without being a
+  standing distraction.
+- **Exemplar selection**: clicking a file in the left-hand list (its
+  thumbnail included) sets it as the Calibrate exemplar, kept in sync with
+  the "Tune on" dropdown — no need to hunt for it by name in a list.
 
 ## Supported input formats
 
