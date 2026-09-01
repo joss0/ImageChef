@@ -22,7 +22,7 @@ const lib = new Function(block[1] + `
     canonicalRecipe, recipeIdentity, SLOT_KEYS,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
-    computeBlockStats,
+    computeBlockStats, normalizeBlockLoss,
     injectPngText, readPngText, stripPngColorChunks,
     writeMinimalJpegExif, injectJpegMinimalExif,
   };
@@ -32,7 +32,7 @@ const {
   canonicalRecipe, recipeIdentity,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
-  computeBlockStats,
+  computeBlockStats, normalizeBlockLoss,
   injectPngText, readPngText, stripPngColorChunks,
   writeMinimalJpegExif, injectJpegMinimalExif,
 } = lib;
@@ -149,6 +149,47 @@ test('computeBlockStats: more different images score lower SSIM than less differ
   const statsSmall = computeBlockStats(a, bSmall, W, H, 8);
   const statsBig = computeBlockStats(a, bBig, W, H, 8);
   assert.ok(statsSmall.meanSsim > statsBig.meanSsim);
+});
+
+// ── normalizeBlockLoss: the ROI heatmap's mask math ───────────────────────
+test('normalizeBlockLoss returns null with no blocks or no loss', () => {
+  assert.equal(normalizeBlockLoss(null), null);
+  assert.equal(normalizeBlockLoss([]), null);
+  assert.equal(normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 0 }]), null);
+});
+
+test('normalizeBlockLoss scales every block relative to the batch max, capped at maxAlpha', () => {
+  const blocks = [
+    { x: 0, y: 0, w: 8, h: 8, sad: 100 },  // the max — should hit maxAlpha exactly
+    { x: 8, y: 0, w: 8, h: 8, sad: 50 },   // half the max — half the alpha
+    { x: 0, y: 8, w: 8, h: 8, sad: 0 },    // no loss — zero alpha, not dropped
+  ];
+  const out = normalizeBlockLoss(blocks, 0.8);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].alpha, 0.8);
+  assert.equal(out[1].alpha, 0.4);
+  assert.equal(out[2].alpha, 0);
+  // Geometry passes through unchanged — the mask must land on the right pixels.
+  assert.deepEqual({ x: out[1].x, y: out[1].y, w: out[1].w, h: out[1].h }, { x: 8, y: 0, w: 8, h: 8 });
+});
+
+test('normalizeBlockLoss defaults maxAlpha so the mask never fully obscures the image', () => {
+  const out = normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 1 }]);
+  assert.equal(out[0].alpha, 0.85);
+  assert.ok(out[0].alpha < 1);
+});
+
+test('normalizeBlockLoss on real computeBlockStats output: the worst block reaches maxAlpha', () => {
+  const W = 16, H = 16;
+  const a = makeFrame(W, H, () => [120, 120, 120]);
+  const b = makeFrame(W, H, (x, y) => (x >= 8 && y >= 8) ? [0, 0, 0] : [120, 120, 120]);
+  const stats = computeBlockStats(a, b, W, H, 8);
+  const mask = normalizeBlockLoss(stats.blocks);
+  const worst = mask.find(m => m.x === 8 && m.y === 8);
+  assert.equal(worst.alpha, 0.85);
+  // Untouched blocks carry zero loss, not omitted from the mask.
+  const untouched = mask.find(m => m.x === 0 && m.y === 0);
+  assert.equal(untouched.alpha, 0);
 });
 
 // ── PNG tEXt injection round-trips ────────────────────────────────────────

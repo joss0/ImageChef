@@ -59,11 +59,13 @@ over whatever order the fields happen to be in.
   ZIP on repeat runs — `{date}` and `{hash:8}` stamp tokens are frozen at
   Save Recipe / read from file content, never wall-clock at Process time.
 - **Image Inspector**: a zoom/pan viewer for eyeballing full images, not just
-  the worst-region loupe's crop — click a file's thumbnail at import time,
-  "View full image" during Calibrate, or "Inspect" on a Process result. Where
-  a region of interest is known (the worst-error 8×8 block), it's marked on
-  the full image with a pulsing, periodically shining highlight, so it's
-  findable before you zoom in.
+  the worst-region loupe's crop — click a file's thumbnail at import time, or
+  "View original vs final" during Calibrate, or "Inspect" on a Process
+  result. The comparison is always the source file as imported against the
+  actual fully-processed result, never an intermediate pipeline step. Where
+  loss is known (every block's error, not just the single worst one), it's
+  marked on the final image as a normalized heatmap that breathes and
+  periodically shines, so the lossy regions are findable before you zoom in.
 
 ## Supported input formats
 

@@ -225,27 +225,28 @@
   .preview-zoom-reset:hover { color: var(--text); }
   .preview-meta { margin-top: 8px; font-size: 0.72rem; color: var(--text-dim); }
 
-  /* Region of interest: a border that breathes plus a diagonal shine that
-     sweeps across every few seconds — draws the eye without being a
-     constant distraction, and stays correctly placed under zoom/pan since
-     it's a sibling of the image inside the same transformed layer. The
-     block itself is often just 8×8 source pixels — a few px on screen at
-     "whole image" scale — so a glow with a fixed px radius (not a %) is
-     what actually makes it findable before you zoom in; min-width/height
-     keep the box from collapsing to sub-pixel at small scale.
+  /* Region-of-interest mask: every block gets a say, not just the single
+     worst one. roi-heat is the baked heatmap (teal alpha = normalized
+     per-block loss, blurred by upscaling from block-grid to full
+     resolution) — it breathes gently so the lossy regions stay findable
+     without being a constant distraction. roi-shine is a diagonal sweep
+     periodically flashing across, CSS-masked by that same heatmap image
+     so it only lights up where loss actually is. Both sit only on the
+     "after" pane — loss lives in output pixel space, which "before" (the
+     true original) doesn't share once resize/orient have changed it. Both
+     are children of the transformed stage, so they track pan/zoom exactly.
   */
-  .roi-shimmer { position: absolute; pointer-events: none; border: 2px solid var(--accent2); border-radius: 2px; overflow: hidden; min-width: 14px; min-height: 14px; animation: roiPulse 2.8s ease-in-out infinite; }
-  .roi-shimmer[hidden] { display: none; }
-  .roi-shimmer::after {
-    content: ''; position: absolute; inset: -10%;
-    background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,0.9) 50%, transparent 58%);
+  .roi-heat, .roi-shine { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .roi-heat[hidden], .roi-shine[hidden] { display: none; }
+  .roi-heat { animation: roiHeatPulse 2.8s ease-in-out infinite; }
+  .roi-shine {
+    background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,0.95) 50%, transparent 58%);
     background-size: 260% 260%; background-position: -160% -160%; opacity: 0;
+    -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
     animation: roiShine 4.2s ease-in-out infinite;
   }
-  @keyframes roiPulse {
-    0%, 78%, 100% { box-shadow: 0 0 0 3px rgba(15,155,142,0.35), 0 0 10px 4px rgba(15,155,142,0.3); }
-    38% { box-shadow: 0 0 0 5px rgba(15,155,142,0.7), 0 0 26px 10px rgba(15,155,142,0.8); }
-  }
+  @keyframes roiHeatPulse { 0%, 78%, 100% { opacity: 0.55; } 38% { opacity: 1; } }
   @keyframes roiShine {
     0%, 80% { background-position: -160% -160%; opacity: 0; }
     86% { opacity: 1; }
@@ -395,24 +396,24 @@
     </div>
     <div class="preview-pair">
       <div class="preview-half before-pane">
-        <label id="inspectorBeforeLabel">Before</label>
+        <label id="inspectorBeforeLabel">Original</label>
         <div class="preview-zoom-viewport" id="zoomViewportBefore">
           <div class="preview-zoom-inner" id="zoomInnerBefore">
             <div class="roi-frame">
               <img id="previewBefore" src="" alt="">
-              <div class="roi-shimmer" id="roiShimmerBefore" hidden></div>
             </div>
           </div>
         </div>
         <div class="preview-meta" id="previewBeforeMeta"></div>
       </div>
       <div class="preview-half">
-        <label id="inspectorAfterLabel">After</label>
+        <label id="inspectorAfterLabel">Final</label>
         <div class="preview-zoom-viewport" id="zoomViewportAfter">
           <div class="preview-zoom-inner" id="zoomInnerAfter">
             <div class="roi-frame">
               <img id="previewAfter" src="" alt="">
-              <div class="roi-shimmer" id="roiShimmerAfter" hidden></div>
+              <img class="roi-heat" id="roiHeat" hidden alt="">
+              <div class="roi-shine" id="roiShine" hidden></div>
             </div>
           </div>
         </div>
@@ -664,6 +665,21 @@ function computeBlockStats(dataA, dataB, W, H, block) {
     }
   }
   return { blocks, meanSsim: ssimWeight ? ssimSum / ssimWeight : 1, worstBlock: worst };
+}
+
+// Pure normalization step for the ROI heatmap: every block's loss relative
+// to the batch's own worst block, scaled to maxAlpha so the mask never
+// fully obscures the image underneath. Split out from the canvas-painting
+// code (buildRoiMaskUrl, DOM-only) so the actual "normalized mask" math is
+// independently testable. Returns null when there's no loss to show — no
+// blocks, or every block a perfect match.
+function normalizeBlockLoss(blocks, maxAlpha) {
+  if (maxAlpha == null) maxAlpha = 0.85;
+  if (!blocks || !blocks.length) return null;
+  let maxSad = 0;
+  for (const b of blocks) if (b.sad > maxSad) maxSad = b.sad;
+  if (maxSad <= 0) return null;
+  return blocks.map(b => ({ x: b.x, y: b.y, w: b.w, h: b.h, alpha: Math.min(1, b.sad / maxSad) * maxAlpha }));
 }
 
 // ── PNG chunk helpers (for metadata retain: tEXt injection) ──────────────
@@ -1635,8 +1651,8 @@ const previewBefore = document.getElementById('previewBefore');
 const previewAfter = document.getElementById('previewAfter');
 const previewBeforeMeta = document.getElementById('previewBeforeMeta');
 const previewAfterMeta = document.getElementById('previewAfterMeta');
-const roiShimmerBefore = document.getElementById('roiShimmerBefore');
-const roiShimmerAfter = document.getElementById('roiShimmerAfter');
+const roiHeat = document.getElementById('roiHeat');
+const roiShine = document.getElementById('roiShine');
 
 const inspectorZoom = { scale: 1, tx: 0, ty: 0 };
 let inspectorPanActive = false, inspectorPanLastX = 0, inspectorPanLastY = 0;
@@ -1705,24 +1721,49 @@ document.addEventListener('mouseup', () => {
 });
 inspectorZoomReset.addEventListener('click', resetInspectorZoom);
 
-// roi: { x, y, w, h, dims: { w, h } } in the pixel space of the frame(s)
-// being shown — both panes share one roi since before/after are always the
-// same pixel dimensions at the point this is called (pre-encode canvas vs.
-// its own decoded re-encode). Positioned as a percentage of the roi-frame
-// so it stays correctly placed under the shared zoom/pan transform.
-function positionRoi(el, roi) {
-  if (!roi) { el.hidden = true; return; }
-  el.hidden = false;
-  el.style.left = (roi.x / roi.dims.w * 100) + '%';
-  el.style.top = (roi.y / roi.dims.h * 100) + '%';
-  el.style.width = (roi.w / roi.dims.w * 100) + '%';
-  el.style.height = (roi.h / roi.dims.h * 100) + '%';
+// Builds a full-resolution heatmap PNG data URL from every block's loss
+// (not just the worst one): normalizeBlockLoss (pure, unit-tested) does the
+// actual math; this just paints it, rendered at block-grid resolution and
+// upscaled with smoothing so it reads as a blurred mask rather than hard
+// tiles. Returns null if there's no loss to show (blocks missing, or a
+// perfect match).
+function buildRoiMaskUrl(blocks, W, H) {
+  const normalized = normalizeBlockLoss(blocks);
+  if (!normalized) return null;
+  const bw = normalized[0].w, bh = normalized[0].h;
+  const cols = Math.ceil(W / bw), rows = Math.ceil(H / bh);
+  const small = newCanvas(cols, rows);
+  const sctx = small.getContext('2d');
+  for (const b of normalized) {
+    sctx.fillStyle = `rgba(15,155,142,${b.alpha.toFixed(3)})`;
+    sctx.fillRect(Math.floor(b.x / bw), Math.floor(b.y / bh), 1, 1);
+  }
+  const big = newCanvas(W, H);
+  const bctx = big.getContext('2d');
+  bctx.imageSmoothingEnabled = true;
+  bctx.imageSmoothingQuality = 'high';
+  bctx.drawImage(small, 0, 0, W, H);
+  return big.toDataURL();
+}
+
+// Applies (or hides) the heatmap + masked-shine overlay on the "after"
+// pane only — loss lives in output pixel space, which "before" (the true
+// original) no longer shares once resize/orient have changed it.
+function applyRoiMask(url) {
+  if (!url) { roiHeat.hidden = true; roiShine.hidden = true; return; }
+  roiHeat.src = url;
+  roiHeat.hidden = false;
+  roiShine.style.maskImage = `url(${url})`;
+  roiShine.style.webkitMaskImage = `url(${url})`;
+  roiShine.hidden = false;
 }
 
 // frame: { canvas, label, meta }. Pass `single` alone for a one-pane view
 // (file list at import time); pass `before`+`after` for a two-pane
-// synchronized comparison (Calibrate, Process).
-function openInspector({ title, before, after, single, roi }) {
+// original-vs-final comparison (Calibrate, Process) — `before` is always
+// the true original, `after` the fully-processed result. `roiMaskUrl`
+// (from buildRoiMaskUrl) marks every lossy region on the "after" pane.
+function openInspector({ title, before, after, single, roiMaskUrl }) {
   resetInspectorZoom();
   inspectorTitle.textContent = title || '';
   if (single) {
@@ -1731,18 +1772,16 @@ function openInspector({ title, before, after, single, roi }) {
     previewAfterMeta.textContent = single.meta || '';
     document.getElementById('inspectorAfterLabel').textContent = single.label || 'Image';
     previewBefore.removeAttribute('src');
-    positionRoi(roiShimmerAfter, roi);
-    roiShimmerBefore.hidden = true;
+    applyRoiMask(null);
   } else {
     inspectorModal.classList.remove('single-pane');
     previewBefore.src = before.canvas.toDataURL();
     previewBeforeMeta.textContent = before.meta || '';
-    document.getElementById('inspectorBeforeLabel').textContent = before.label || 'Before';
+    document.getElementById('inspectorBeforeLabel').textContent = before.label || 'Original';
     previewAfter.src = after.canvas.toDataURL();
     previewAfterMeta.textContent = after.meta || '';
-    document.getElementById('inspectorAfterLabel').textContent = after.label || 'After';
-    positionRoi(roiShimmerBefore, roi);
-    positionRoi(roiShimmerAfter, roi);
+    document.getElementById('inspectorAfterLabel').textContent = after.label || 'Final';
+    applyRoiMask(roiMaskUrl || null);
   }
   inspectorModal.classList.add('open');
 }
@@ -2112,21 +2151,10 @@ async function recalcCalibratePreview() {
   const resizeView = document.getElementById('resizeDeltaView');
   if (state.draft.resize) {
     const before = { w: canvas.width, h: canvas.height };
-    const preResizeCanvas = canvas;
     canvas = applyResize(canvas, state.draft.resize);
-    const resizedCanvas = canvas;
     resizeView.innerHTML = `<div class="delta-thumb-pair"><div><div class="notice" style="display:inline-block">${before.w}×${before.h}</div><img src="${base.toDataURL()}"></div>
       <span style="align-self:center">→</span>
       <div><div class="notice" style="display:inline-block">${canvas.width}×${canvas.height}</div><img src="${canvas.toDataURL()}"></div></div>`;
-    const resizeInspectBtn = document.createElement('button');
-    resizeInspectBtn.className = 'inspect-btn';
-    resizeInspectBtn.textContent = '🔍 View full image';
-    resizeInspectBtn.addEventListener('click', () => openInspector({
-      title: entry.file.name + ' — resize',
-      before: { canvas: preResizeCanvas, label: 'Before', meta: `${before.w}×${before.h}` },
-      after: { canvas: resizedCanvas, label: 'After', meta: `${resizedCanvas.width}×${resizedCanvas.height}` },
-    }));
-    resizeView.appendChild(resizeInspectBtn);
   } else {
     resizeView.innerHTML = '';
   }
@@ -2184,9 +2212,9 @@ async function recalcCalibratePreview() {
   `;
 
   const encodeView = document.getElementById('encodeDeltaView');
+  encodeView.innerHTML = '';
   if (stats) {
     const { beforeCanvas, afterCanvas } = renderLoupe(canvas, decodedCanvas, stats.worstBlock);
-    encodeView.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.className = 'loupe-wrap';
     wrap.innerHTML = `<div class="notice">Worst-region loupe — highest-error 8×8 tile, magnified</div>`;
@@ -2207,26 +2235,37 @@ async function recalcCalibratePreview() {
       afterCanvas.style.display = showingBefore ? 'none' : '';
       flickerBtn.textContent = '🔁 Flicker: showing ' + (showingBefore ? 'Before' : 'After');
     });
-    const btnRow = document.createElement('div');
-    btnRow.style.display = 'flex'; btnRow.style.gap = '6px';
-    const roiInspectBtn = document.createElement('button');
-    roiInspectBtn.className = 'inspect-btn';
-    roiInspectBtn.textContent = '🔍 View in full image';
-    const wb = stats.worstBlock;
-    roiInspectBtn.addEventListener('click', () => openInspector({
-      title: entry.file.name + ' — encode',
-      before: { canvas, label: 'Before (pre-encode)', meta: `${canvas.width}×${canvas.height}` },
-      after: { canvas: decodedCanvas, label: `After (${fmtBytes(blob.size)})`, meta: `SSIM ${achievedSsim.toFixed(4)}` },
-      roi: { x: wb.x, y: wb.y, w: wb.w, h: wb.h, dims: { w: canvas.width, h: canvas.height } },
-    }));
-    btnRow.appendChild(flickerBtn);
-    btnRow.appendChild(roiInspectBtn);
     wrap.appendChild(canvasWrap);
-    wrap.appendChild(btnRow);
+    wrap.appendChild(flickerBtn);
     encodeView.appendChild(wrap);
   } else {
-    encodeView.innerHTML = '<div class="notice">PNG is lossless — no worst-region loupe to show.</div>';
+    const notice = document.createElement('div');
+    notice.className = 'notice';
+    notice.textContent = 'PNG is lossless — no worst-region loupe to show.';
+    encodeView.appendChild(notice);
   }
+
+  // One comparison, always original vs. the fully-processed final result —
+  // not an intermediate pipeline step — with every lossy region (not just
+  // the single worst block) marked as a normalized heatmap on the final
+  // pane. PNG has no loss, so no heatmap, but the comparison itself still
+  // holds: "final" for lossless output is the pre-encode canvas unchanged.
+  const compareBtn = document.createElement('button');
+  compareBtn.className = 'inspect-btn';
+  compareBtn.textContent = '🔍 View original vs final';
+  compareBtn.style.marginTop = '8px';
+  compareBtn.addEventListener('click', async () => {
+    const originalCanvas = await ensureSourceCanvas(entry);
+    const finalCanvas = decodedCanvas || canvas;
+    const roiMaskUrl = stats ? buildRoiMaskUrl(stats.blocks, canvas.width, canvas.height) : null;
+    openInspector({
+      title: entry.file.name,
+      before: { canvas: originalCanvas, label: 'Original', meta: `${originalCanvas.width}×${originalCanvas.height}` },
+      after: { canvas: finalCanvas, label: `Final (${fmtBytes(blob.size)})`, meta: stats ? `SSIM ${achievedSsim.toFixed(4)}` : 'lossless' },
+      roiMaskUrl,
+    });
+  });
+  encodeView.appendChild(compareBtn);
 
   updateRecipeJsonView();
 }
@@ -2299,24 +2338,23 @@ function renderResultsTable(results) {
   }
 }
 
-// Reconstructs the pre-encode canvas on demand (same file + same saved
-// recipe = same canvas, by construction) rather than holding every
-// processed image's full pixel data in memory for the whole batch run —
-// "after processing" inspection stays available without that cost.
+// Original vs. final, same as Calibrate: "before" is the source file as
+// imported (cached on the entry, decoded once), "after" is the actual
+// output bytes decoded back — the real final result, not a reconstructed
+// intermediate. Every lossy region (not just the worst block) is marked as
+// a normalized heatmap on the final pane, from the block stats already
+// computed and retained for this result during the batch run.
 async function inspectProcessResult(r) {
-  const recipe = state.savedRecipe;
   const entry = state.files.find(f => f.file.name === r.name);
-  if (!entry || !recipe) return;
-  const srcBytes = await entry.bytesPromise;
-  const hash = await entry.hashPromise;
-  const { canvas: beforeCanvas } = await buildPreEncodeCanvas(entry.file, srcBytes, entry.ext, recipe, batchCtx, hash);
+  if (!entry) return;
+  const originalCanvas = await ensureSourceCanvas(entry);
   const afterCanvas = await decodeBlobToCanvas(new Blob([r.outBytes], { type: FORMAT_MIME[r.format] || 'image/jpeg' }));
-  const wb = r.stats && r.stats.worstBlock;
+  const roiMaskUrl = r.stats ? buildRoiMaskUrl(r.stats.blocks, afterCanvas.width, afterCanvas.height) : null;
   openInspector({
     title: r.name,
-    before: { canvas: beforeCanvas, label: 'Before (pre-encode)', meta: `${beforeCanvas.width}×${beforeCanvas.height}` },
-    after: { canvas: afterCanvas, label: `After (${fmtBytes(r.after)})`, meta: r.ssim != null ? `SSIM ${r.ssim.toFixed(4)}` : 'lossless' },
-    roi: wb ? { x: wb.x, y: wb.y, w: wb.w, h: wb.h, dims: { w: beforeCanvas.width, h: beforeCanvas.height } } : null,
+    before: { canvas: originalCanvas, label: 'Original', meta: `${originalCanvas.width}×${originalCanvas.height}` },
+    after: { canvas: afterCanvas, label: `Final (${fmtBytes(r.after)})`, meta: r.ssim != null ? `SSIM ${r.ssim.toFixed(4)}` : 'lossless' },
+    roiMaskUrl,
   });
 }
 
