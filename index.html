@@ -361,9 +361,12 @@
         <div class="slot-head"><span class="slot-name">Batch run</span></div>
         <div class="slot-body">
           <pre class="recipe-json" id="processRecipeView"></pre>
+          <div class="notice">This recipe is saved in the page URL — bookmark it (or copy the link below) to come
+            straight back here with the recipe already loaded: drop images, Run Batch, review, download.</div>
           <div class="btn-row" style="padding:0">
             <button class="btn-primary" id="runBatchBtn">🍳 Run Batch</button>
             <button class="btn-success" id="downloadZipBtn" disabled>⬇ Download ZIP</button>
+            <button class="btn-secondary" id="copyRecipeLinkBtn">🔗 Copy bookmark link</button>
           </div>
           <div class="progress-area">
             <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBarFill"></div></div>
@@ -482,6 +485,33 @@ function canonicalRecipe(r) {
 }
 
 function recipeIdentity(r) { return JSON.stringify(canonicalRecipe(r)); }
+
+// ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
+// UTF-8 safe (a stamp template can carry non-ASCII text), and the fragment
+// alphabet (base64 plus '=') never needs percent-encoding in a URL hash.
+// Round-trips through canonicalRecipe so a hand-edited or stale hash can
+// only ever produce a recipe shaped like every other recipe in the app —
+// unknown keys are dropped, not carried through as-is.
+function recipeToHash(recipe) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalRecipe(recipe)));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return '#recipe=' + btoa(binary);
+}
+
+function recipeFromHash(hash) {
+  const m = /^#recipe=(.+)$/.exec(hash || '');
+  if (!m) return null;
+  try {
+    const binary = atob(m[1]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    return (parsed && typeof parsed === 'object') ? canonicalRecipe(parsed) : null;
+  } catch {
+    return null;
+  }
+}
 
 // ── Orientation: a closed group of 8 states (D4), not an operation list ──
 // Index = EXIF orientation code minus 1. {rotate} is the clockwise degrees
@@ -2313,15 +2343,39 @@ function renderLoupe(preCanvas, postCanvas, worstBlock) {
   return { beforeCanvas, afterCanvas };
 }
 
-// ── Save Recipe ──
-document.getElementById('saveRecipeBtn').addEventListener('click', () => {
-  const recipe = canonicalRecipe(state.draft);
-  recipe.createdDate = new Date().toISOString().slice(0, 10);
+// ── Save Recipe: also the recipe's bookmark. replaceState keeps the
+// address bar — and so any bookmark of it — in sync with the saved recipe
+// without piling up a history entry per save. Shared with the page-load
+// restore path below so "just saved" and "just opened a bookmark" apply a
+// recipe identically. ──
+function applySavedRecipe(recipe) {
   state.savedRecipe = recipe;
   document.getElementById('processRecipeView').textContent = JSON.stringify(recipe, null, 2);
   tabs.process.disabled = false;
   updateCounts();
+}
+document.getElementById('saveRecipeBtn').addEventListener('click', () => {
+  const recipe = canonicalRecipe(state.draft);
+  recipe.createdDate = new Date().toISOString().slice(0, 10);
+  applySavedRecipe(recipe);
+  history.replaceState(null, '', recipeToHash(recipe));
   setMode('process');
+});
+
+const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
+copyRecipeLinkBtn.addEventListener('click', async () => {
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+    const original = copyRecipeLinkBtn.textContent;
+    copyRecipeLinkBtn.textContent = '✓ Copied';
+    setTimeout(() => { copyRecipeLinkBtn.textContent = original; }, 1500);
+  } catch {
+    // Clipboard access can be unavailable (permissions, older browser); the
+    // link is already sitting in the address bar either way, so fall back
+    // to just surfacing it directly rather than failing silently.
+    window.prompt('Copy this link:', url);
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -2463,6 +2517,17 @@ downloadZipBtn.addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
+
+// ── Restore a saved recipe from the URL: a bookmark drops you straight
+// into Process, ready to drop files, Run Batch, and review — no need to
+// revisit Audit or Calibrate to get back to a recipe already settled on. ──
+(function restoreRecipeFromHash() {
+  const recipe = recipeFromHash(location.hash);
+  if (!recipe) return;
+  if (!recipe.createdDate) recipe.createdDate = new Date().toISOString().slice(0, 10);
+  applySavedRecipe(recipe);
+  setMode('process');
+})();
 
 </script>
 </body>

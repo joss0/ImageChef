@@ -40,7 +40,10 @@ over whatever order the fields happen to be in.
   to an optional byte cap; a conflict between the two is reported by name,
   not silently resolved, and the run continues for the rest of the batch.
   Output is a ZIP (optionally with a `manifest.json` built by the same report
-  generator Audit uses).
+  generator Audit uses). Saving a recipe writes it into the page URL, so the
+  saved state is a bookmark: open it and you land straight on Process with
+  the recipe already loaded — drop images, Run Batch, review, download,
+  with no need to revisit Audit or Calibrate.
 
 ## Notable behavior
 

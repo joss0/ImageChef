@@ -19,7 +19,7 @@ assert.ok(block, 'ENGINE-LIB block not found in index.html');
 
 const lib = new Function(block[1] + `
   return {
-    canonicalRecipe, recipeIdentity, SLOT_KEYS,
+    canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
     computeBlockStats, normalizeBlockLoss,
@@ -29,7 +29,7 @@ const lib = new Function(block[1] + `
 `)();
 
 const {
-  canonicalRecipe, recipeIdentity,
+  canonicalRecipe, recipeIdentity, recipeToHash, recipeFromHash,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
   computeBlockStats, normalizeBlockLoss,
@@ -48,6 +48,38 @@ test('canonicalRecipe drops unknown keys and keeps createdDate', () => {
   const r = { bogus: 1, orient: 0, createdDate: '2026-07-13' };
   const c = canonicalRecipe(r);
   assert.deepEqual(c, { orient: 0, createdDate: '2026-07-13' });
+});
+
+// ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
+test('recipeToHash / recipeFromHash round-trip a recipe unchanged', () => {
+  const recipe = {
+    orient: 5,
+    resize: { intent: 'fit', dimensions: { width: 1920, height: 1080 } },
+    encode: { format: 'jpeg', ssimTarget: 0.987, maxBytes: 400000 },
+    createdDate: '2026-09-01',
+  };
+  const hash = recipeToHash(recipe);
+  assert.match(hash, /^#recipe=/);
+  assert.deepEqual(recipeFromHash(hash), canonicalRecipe(recipe));
+});
+
+test('recipeToHash / recipeFromHash round-trip non-ASCII stamp text', () => {
+  const recipe = { stamp: { template: '© 2026 — café ★', position: 'br', style: {} } };
+  const hash = recipeToHash(recipe);
+  assert.deepEqual(recipeFromHash(hash), canonicalRecipe(recipe));
+});
+
+test('recipeFromHash drops unknown keys, same as canonicalRecipe', () => {
+  const hash = recipeToHash({ orient: 2, bogus: 'nope' });
+  assert.deepEqual(recipeFromHash(hash), { orient: 2 });
+});
+
+test('recipeFromHash returns null for a missing, malformed, or tampered hash', () => {
+  assert.equal(recipeFromHash(''), null);
+  assert.equal(recipeFromHash('#recipe='), null);
+  assert.equal(recipeFromHash('#recipe=not-valid-base64!!!'), null);
+  assert.equal(recipeFromHash('#somethingElse=abc'), null);
+  assert.equal(recipeFromHash(undefined), null);
 });
 
 // ── Orientation: closed group of 8 ────────────────────────────────────────
