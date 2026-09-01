@@ -111,11 +111,18 @@
   .file-list { flex: 1; overflow: auto; margin: 0 12px 12px; }
   .file-row {
     display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-bottom: 1px solid var(--border);
-    font-size: 0.78rem;
+    font-size: 0.78rem; cursor: pointer;
   }
+  .file-row:hover { background: var(--hover); }
   .file-row .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-row .fsize { color: var(--text-dim); font-size: 0.72rem; }
   .file-row.exemplar { background: rgba(15,155,142,0.12); }
+  .file-row.exemplar:hover { background: rgba(15,155,142,0.2); }
+  .file-thumb {
+    width: 28px; height: 28px; border-radius: 3px; border: 1px solid var(--border); background: var(--surface2);
+    object-fit: cover; flex-shrink: 0; cursor: zoom-in;
+  }
+  .file-thumb.placeholder { display: flex; align-items: center; justify-content: center; font-size: 0.75rem; cursor: default; }
   .file-remove { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 0.85rem; padding: 2px 6px; border-radius: 3px; }
   .file-remove:hover { background: rgba(244,67,54,0.2); color: var(--error); }
   button {
@@ -189,6 +196,70 @@
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   code, pre { font-family: ui-monospace, monospace; }
   pre.recipe-json { background: var(--surface2); border-radius: 4px; padding: 10px; font-size: 0.72rem; overflow: auto; max-height: 220px; }
+
+  /* ── Image Inspector: zoom/pan modal with ROI shimmer overlay ── */
+  .inspect-btn { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px; font-size: 0.72rem; padding: 3px 8px; cursor: zoom-in; }
+  .inspect-btn:hover { color: var(--text); }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1000; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; max-width: 92vw; max-height: 92vh; overflow: auto; min-width: 400px; }
+  .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 12px; }
+  .modal-header h2 { font-size: 1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .modal-close { background: none; color: var(--text-dim); font-size: 1.2rem; border: none; cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
+  .preview-pair { display: flex; gap: 16px; align-items: flex-start; }
+  .modal-overlay.single-pane .preview-half.before-pane { display: none; }
+  .preview-half { flex: 1; text-align: center; min-width: 0; }
+  .preview-half label { display: block; margin-bottom: 6px; font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; }
+  .preview-zoom-viewport {
+    overflow: hidden; border: 1px solid var(--border); border-radius: 4px; cursor: grab; user-select: none;
+    position: relative; height: 60vh; background: var(--surface2); display: flex; align-items: center; justify-content: center;
+  }
+  .preview-zoom-viewport.panning { cursor: grabbing; }
+  .preview-zoom-inner { transform-origin: center center; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
+  .roi-frame { position: relative; display: inline-block; line-height: 0; }
+  .preview-half img { max-width: 100%; max-height: 60vh; display: block; pointer-events: none; }
+  .preview-zoom-hint { font-size: 0.65rem; color: var(--text-dim); }
+  .preview-zoom-level { font-size: 0.7rem; color: var(--text); font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; }
+  .preview-zoom-reset {
+    font-size: 0.65rem; padding: 1px 7px; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text-dim); border-radius: 3px; cursor: pointer; display: none;
+  }
+  .preview-zoom-reset:hover { color: var(--text); }
+  .preview-meta { margin-top: 8px; font-size: 0.72rem; color: var(--text-dim); }
+
+  /* Region-of-interest mask: every block gets a say, not just the single
+     worst one. roi-heat is the baked heatmap (teal alpha = normalized
+     per-block loss, power-law biased toward the worst blocks, blurred by
+     upscaling from block-grid to full resolution). The unaffected image is
+     what you see almost all the time — the mask flashes on for about half
+     a second every 3 seconds, not a constant tint, so it draws the eye
+     without being a standing distraction. roi-shine sweeps a diagonal
+     highlight across during that same half-second, CSS-masked by the same
+     heatmap image so it only lights up where loss actually is. Both sit
+     only on the "after" pane — loss lives in output pixel space, which
+     "before" (the true original) doesn't share once resize/orient have
+     changed it. Both are children of the transformed stage, so they track
+     pan/zoom exactly.
+  */
+  .roi-heat, .roi-shine { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .roi-heat[hidden], .roi-shine[hidden] { display: none; }
+  .roi-heat { animation: roiHeatPulse 3s ease-in-out infinite; }
+  .roi-shine {
+    background: linear-gradient(115deg, transparent 42%, rgba(255,255,255,0.95) 50%, transparent 58%);
+    background-size: 260% 260%; background-position: -160% -160%; opacity: 0;
+    -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+    animation: roiShine 3s ease-in-out infinite;
+  }
+  @keyframes roiHeatPulse {
+    0%, 16.7%, 100% { opacity: 0; }
+    6%, 11% { opacity: 1; }
+  }
+  @keyframes roiShine {
+    0%, 16.7%, 100% { opacity: 0; background-position: -160% -160%; }
+    6% { opacity: 1; }
+    11% { opacity: 1; background-position: 160% 160%; }
+  }
 </style>
 </head>
 <body>
@@ -290,9 +361,13 @@
         <div class="slot-head"><span class="slot-name">Batch run</span></div>
         <div class="slot-body">
           <pre class="recipe-json" id="processRecipeView"></pre>
+          <div class="notice">This recipe is saved in the page URL — bookmark it (or copy the link below) to come
+            straight back here with the recipe already loaded: drop images, Run Batch, review, download.</div>
+          <div class="notice warn" id="legacyRecipeNotice" style="display:none"></div>
           <div class="btn-row" style="padding:0">
             <button class="btn-primary" id="runBatchBtn">🍳 Run Batch</button>
             <button class="btn-success" id="downloadZipBtn" disabled>⬇ Download ZIP</button>
+            <button class="btn-secondary" id="copyRecipeLinkBtn">🔗 Copy bookmark link</button>
           </div>
           <div class="progress-area">
             <div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBarFill"></div></div>
@@ -305,7 +380,7 @@
         <div class="slot-body">
           <div style="overflow:auto">
             <table id="resultsTable">
-              <thead><tr><th>Name</th><th>Before</th><th>After</th><th>Quality</th><th>SSIM</th><th>Status</th></tr></thead>
+              <thead><tr><th>Name</th><th>Before</th><th>After</th><th>Quality</th><th>SSIM</th><th>Status</th><th>Inspect</th></tr></thead>
               <tbody id="resultsTableBody"></tbody>
             </table>
           </div>
@@ -314,6 +389,49 @@
     </section>
 
   </main>
+</div>
+
+<!-- ═══ Image Inspector: zoom/pan modal, one or two panes, with an optional
+     ROI shimmer overlay. Reused by the file list (import time), Calibrate
+     (before processing) and Process (after processing). ═══ -->
+<div class="modal-overlay" id="inspectorModal" role="dialog" aria-modal="true" aria-label="Image inspector">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="inspectorTitle">Image Inspector</h2>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <span class="preview-zoom-hint">Scroll to zoom · drag to pan</span>
+        <span class="preview-zoom-level" id="inspectorZoomLevel">100%</span>
+        <button class="preview-zoom-reset" id="inspectorZoomReset">Reset</button>
+      </div>
+      <button class="modal-close" id="inspectorClose" aria-label="Close inspector">✕</button>
+    </div>
+    <div class="preview-pair">
+      <div class="preview-half before-pane">
+        <label id="inspectorBeforeLabel">Original</label>
+        <div class="preview-zoom-viewport" id="zoomViewportBefore">
+          <div class="preview-zoom-inner" id="zoomInnerBefore">
+            <div class="roi-frame">
+              <img id="previewBefore" src="" alt="">
+            </div>
+          </div>
+        </div>
+        <div class="preview-meta" id="previewBeforeMeta"></div>
+      </div>
+      <div class="preview-half">
+        <label id="inspectorAfterLabel">Final</label>
+        <div class="preview-zoom-viewport" id="zoomViewportAfter">
+          <div class="preview-zoom-inner" id="zoomInnerAfter">
+            <div class="roi-frame">
+              <img id="previewAfter" src="" alt="">
+              <img class="roi-heat" id="roiHeat" hidden alt="">
+              <div class="roi-shine" id="roiShine" hidden></div>
+            </div>
+          </div>
+        </div>
+        <div class="preview-meta" id="previewAfterMeta"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ═══ Vendored dependency: fflate 0.8.2 (MIT License, https://github.com/101arrowz/fflate) ═══ -->
@@ -369,6 +487,45 @@ function canonicalRecipe(r) {
 
 function recipeIdentity(r) { return JSON.stringify(canonicalRecipe(r)); }
 
+// ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
+// UTF-8 safe (a stamp template can carry non-ASCII text), and the fragment
+// alphabet (base64 plus '=') never needs percent-encoding in a URL hash.
+// Round-trips through canonicalRecipe so a hand-edited or stale hash can
+// only ever produce a recipe shaped like every other recipe in the app —
+// unknown keys are dropped, not carried through as-is.
+function recipeToHash(recipe) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalRecipe(recipe)));
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return '#recipe=' + btoa(binary);
+}
+
+// Returns { recipe, legacy, notes } — `legacy` is true when the hash held
+// a pre-rework (CyberChef-style ordered op list) recipe rather than the
+// current record; `notes` lists anything from a legacy recipe that
+// couldn't be carried forward, and why (see migrateLegacyRecipe). Returns
+// null only when the hash is missing or unparseable, never for a legacy
+// recipe — that always degrades to *something* plus an explanation,
+// rather than silently vanishing.
+function recipeFromHash(hash) {
+  const m = /^#recipe=(.+)$/.exec(hash || '');
+  if (!m) return null;
+  try {
+    const binary = atob(m[1]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    if (Array.isArray(parsed)) {
+      const { recipe, notes } = migrateLegacyRecipe(parsed);
+      return { recipe, legacy: true, notes };
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    return { recipe: canonicalRecipe(parsed), legacy: false, notes: [] };
+  } catch {
+    return null;
+  }
+}
+
 // ── Orientation: a closed group of 8 states (D4), not an operation list ──
 // Index = EXIF orientation code minus 1. {rotate} is the clockwise degrees
 // applied to the canvas AFTER a horizontal mirror (matches the standard
@@ -408,6 +565,104 @@ function orientStateIndexFromMatrix(m) {
     if (om[0] === m[0] && om[1] === m[1] && om[2] === m[2] && om[3] === m[3]) return i;
   }
   throw new Error('orientation matrix not in D4 — should be unreachable');
+}
+
+// ── Legacy recipe migration ───────────────────────────────────────────────
+// Before the fixed-pipeline rework, a recipe was an ORDERED, user-arranged
+// list of {op, enabled, config} steps (see imagechef-outline.md — kept for
+// history, not current documentation). That model is gone, but recipes
+// bookmarked under it shouldn't just silently stop working or quietly
+// resolve to an empty/wrong recipe. Every old op is handled explicitly:
+//
+//   rotate    -> orient    exact (same D4 math the engine already uses)
+//   resize    -> resize    exact for 'fit'/'exact' (both did the same
+//                          aspect-fit math) and for 'longest' (fitting a
+//                          square box of that side caps the long edge
+//                          identically); 'percent' has no fixed-recipe
+//                          equivalent (relative to each image) — dropped
+//   compress  -> encode    exact for a per-image KB cap; a *total batch*
+//                          budget has no per-image equivalent — dropped
+//   format    -> encode    exact for jpeg/png/webp; 'keep original' varied
+//                          per image — defaulted to jpeg
+//   strip     -> (none)    was already a no-op then (canvas re-encode
+//                          always stripped); metadata defaults to
+//                          strip-all now too, so nothing needs setting
+//   rename    -> (none)    custom output filenames aren't configurable
+//                          anymore — dropped
+//   grayscale -> (none)    no color/tone slot exists in the fixed
+//                          pipeline — dropped
+//
+// A disabled step (enabled: false) is skipped, same as it was live. Every
+// drop is reported in `notes` — never silent — so the UI can tell the
+// user exactly what didn't make it across and why, rather than them
+// discovering it later as an unexplained difference in output.
+function migrateLegacyRecipe(steps) {
+  const recipe = {};
+  const notes = [];
+  if (!Array.isArray(steps)) return { recipe: canonicalRecipe(recipe), notes };
+
+  for (const step of steps) {
+    if (!step || step.enabled === false || typeof step.op !== 'string') continue;
+    const config = step.config || {};
+    switch (step.op) {
+      case 'rotate': {
+        const sh = config.flipH ? [-1, 0, 0, 1] : [1, 0, 0, 1];
+        const sv = config.flipV ? [1, 0, 0, -1] : [1, 0, 0, 1];
+        try {
+          const m = mat2mul(mat2mul(sh, sv), rotMatrix(config.degrees || 0));
+          recipe.orient = orientStateIndexFromMatrix(m);
+        } catch {
+          notes.push(`Rotate/Flip: unsupported rotation (${config.degrees}°), skipped.`);
+        }
+        break;
+      }
+      case 'resize': {
+        if (config.mode === 'fit' || config.mode === 'exact') {
+          recipe.resize = { intent: 'fit', dimensions: { width: config.w || 1920, height: config.h || 1080 } };
+        } else if (config.mode === 'longest') {
+          const side = config.longest || 1600;
+          recipe.resize = { intent: 'fit', dimensions: { width: side, height: side } };
+        } else if (config.mode === 'percent') {
+          notes.push('Resize: "percent" mode scaled relative to each image’s own size and has no fixed-recipe equivalent — dropped. Set an explicit size in Calibrate.');
+        } else {
+          notes.push(`Resize: unrecognized mode "${config.mode}", skipped.`);
+        }
+        break;
+      }
+      case 'compress': {
+        if (config.mode === 'total') {
+          notes.push('Compress: the "total batch" budget has no per-image equivalent — dropped. Set a per-image byte cap in Calibrate if you need one.');
+        } else {
+          recipe.encode = { ...recipe.encode, maxBytes: Math.round((config.perKB || 500) * 1024) };
+        }
+        break;
+      }
+      case 'format': {
+        if (config.output === 'jpeg' || config.output === 'png' || config.output === 'webp') {
+          recipe.encode = { ...recipe.encode, format: config.output };
+        } else if (config.output === 'keep') {
+          notes.push('Format: "Keep original" varied the output format per image and has no fixed-recipe equivalent — defaulted to JPEG. Change it in Calibrate if needed.');
+          recipe.encode = { ...recipe.encode, format: 'jpeg' };
+        } else {
+          notes.push(`Format: unrecognized output "${config.output}", skipped.`);
+        }
+        break;
+      }
+      case 'strip':
+        break; // no-op then, matches the strip-all default now
+      case 'rename':
+        notes.push(`Rename ("${config.pattern || '{name}'}"): custom output filenames aren’t configurable anymore — dropped. Output names are derived automatically.`);
+        break;
+      case 'grayscale':
+        notes.push('Grayscale: color/tone operations were dropped from the fixed pipeline — no equivalent slot exists.');
+        break;
+      default:
+        notes.push(`Unrecognized step "${step.op}", skipped.`);
+    }
+  }
+
+  if (!recipe.encode || !recipe.encode.format) recipe.encode = { ...recipe.encode, format: 'jpeg' };
+  return { recipe: canonicalRecipe(recipe), notes };
 }
 
 // compose(a, b): apply b's transform to raw pixels first, then a's on top —
@@ -558,6 +813,30 @@ function computeBlockStats(dataA, dataB, W, H, block) {
     }
   }
   return { blocks, meanSsim: ssimWeight ? ssimSum / ssimWeight : 1, worstBlock: worst };
+}
+
+// Pure normalization step for the ROI heatmap: every block's loss relative
+// to the batch's own worst block, scaled to maxAlpha so the mask never
+// fully obscures the image underneath. A linear map makes ordinary,
+// moderate loss look as saturated as the actual worst regions — a wash of
+// green over most of the image — so the normalized ratio is biased through
+// a power law (gamma > 1) first: only blocks genuinely close to the worst
+// stay strongly tinted, everything more moderate fades out much faster.
+// Split out from the canvas-painting code (buildRoiMaskUrl, DOM-only) so
+// the actual "normalized mask" math is independently testable. Returns
+// null when there's no loss to show — no blocks, or every block a perfect
+// match.
+function normalizeBlockLoss(blocks, maxAlpha, gamma) {
+  if (maxAlpha == null) maxAlpha = 0.85;
+  if (gamma == null) gamma = 2.2;
+  if (!blocks || !blocks.length) return null;
+  let maxSad = 0;
+  for (const b of blocks) if (b.sad > maxSad) maxSad = b.sad;
+  if (maxSad <= 0) return null;
+  return blocks.map(b => {
+    const norm = Math.min(1, b.sad / maxSad);
+    return { x: b.x, y: b.y, w: b.w, h: b.h, alpha: Math.pow(norm, gamma) * maxAlpha };
+  });
 }
 
 // ── PNG chunk helpers (for metadata retain: tEXt injection) ──────────────
@@ -1189,7 +1468,11 @@ async function injectRetainedMetadata(bytes, format, retainedValues) {
 // ── the fixed pipeline ──
 // batchCtx: { seqOf(name), createdDate }. tokens.hash is filled in by the
 // caller from the file's precomputed content hash.
-async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
+//
+// Split out from runPipeline so the Process-mode Inspector can reconstruct
+// the exact pre-encode canvas on demand (same file + same recipe = same
+// canvas, by the determinism commandment) without re-running encode.
+async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash) {
   const decoded = await (async () => {
     const bitmap = await createImageBitmap(file, { imageOrientation: 'none', colorSpaceConversion: 'default' });
     const c = newCanvas(bitmap.width, bitmap.height);
@@ -1227,6 +1510,12 @@ async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
   deltas.flatten = needsFlatten ? (flattenColor || '#ffffff') : null;
 
   deltas.color = recipe.color ? 'sRGB (tagged)' : 'sRGB (untagged — canvas output is always sRGB)';
+
+  return { canvas, deltas, name, format };
+}
+
+async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
+  const { canvas, deltas, name, format } = await buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash);
 
   const retainedValues = gatherRetainedValues(srcBytes, ext, recipe.metadata && recipe.metadata.retain);
   deltas.metadata = { available: gatherRetainedValues(srcBytes, ext, RETAINABLE_FIELDS), retained: retainedValues };
@@ -1365,11 +1654,68 @@ const folderInput = document.getElementById('folderInput');
 const folderPickBtn = document.getElementById('folderPickBtn');
 const clearFilesBtn = document.getElementById('clearFilesBtn');
 
+// Decoded once per file and cached on the entry — reused for both the file
+// list's thumbnail and the full-size Inspector view, so switching modes or
+// re-rendering the list never re-decodes. Orientation is auto-applied here
+// (unlike the pipeline's own decode, which composes it explicitly) because
+// this is a human eyeballing the file as imported, not a processing step.
+async function ensureSourceCanvas(entry) {
+  if (!entry.sourceCanvasPromise) {
+    entry.sourceCanvasPromise = (async () => {
+      const bitmap = await createImageBitmap(entry.file, { imageOrientation: 'from-image' });
+      const c = newCanvas(bitmap.width, bitmap.height);
+      c.getContext('2d').drawImage(bitmap, 0, 0);
+      bitmap.close();
+      return c;
+    })().catch(() => null);
+  }
+  return entry.sourceCanvasPromise;
+}
+async function ensureThumbUrl(entry) {
+  if (entry.thumbUrl !== undefined) return entry.thumbUrl;
+  const canvas = await ensureSourceCanvas(entry);
+  if (!canvas) return (entry.thumbUrl = null);
+  const size = 28;
+  const scale = Math.max(size / canvas.width, size / canvas.height);
+  const tw = Math.max(1, Math.round(canvas.width * scale)), th = Math.max(1, Math.round(canvas.height * scale));
+  const t = newCanvas(tw, th);
+  t.getContext('2d').drawImage(canvas, 0, 0, tw, th);
+  return (entry.thumbUrl = t.toDataURL());
+}
+async function inspectSourceFile(entry) {
+  const canvas = await ensureSourceCanvas(entry);
+  if (!canvas) return;
+  openInspector({
+    title: entry.file.name,
+    single: { canvas, label: 'Source (as imported)', meta: `${canvas.width}×${canvas.height} · ${fmtBytes(entry.file.size)}` },
+  });
+}
+
 function renderFileList() {
   fileListEl.innerHTML = '';
   for (const entry of state.files) {
     const row = document.createElement('div');
     row.className = 'file-row' + (entry.id === state.exemplarId ? ' exemplar' : '');
+    row.title = 'Click to use as the Calibrate exemplar';
+    // Selecting the exemplar from this list (thumbnail included — clicking
+    // it both inspects and picks it) mirrors the Calibrate "Tune on"
+    // dropdown; that dropdown stays in sync via renderExemplarSelect.
+    row.addEventListener('click', () => {
+      if (state.exemplarId === entry.id) return;
+      state.exemplarId = entry.id;
+      renderFileList();
+      renderExemplarSelect();
+    });
+    const thumb = document.createElement('img');
+    thumb.className = 'file-thumb';
+    thumb.alt = '';
+    thumb.title = 'Click to inspect';
+    thumb.addEventListener('click', () => inspectSourceFile(entry));
+    if (entry.thumbUrl) {
+      thumb.src = entry.thumbUrl;
+    } else {
+      ensureThumbUrl(entry).then(url => { if (url) thumb.src = url; });
+    }
     const fname = document.createElement('span');
     fname.className = 'fname';
     fname.textContent = entry.file.name;
@@ -1380,14 +1726,15 @@ function renderFileList() {
     rm.className = 'file-remove';
     rm.textContent = '✕';
     rm.setAttribute('aria-label', 'Remove ' + entry.file.name);
-    rm.addEventListener('click', () => {
+    rm.addEventListener('click', (e) => {
+      e.stopPropagation();
       state.files = state.files.filter(f => f.id !== entry.id);
       if (state.exemplarId === entry.id) state.exemplarId = state.files[0]?.id ?? null;
       renderFileList();
       renderExemplarSelect();
       updateCounts();
     });
-    row.appendChild(fname); row.appendChild(fsize); row.appendChild(rm);
+    row.appendChild(thumb); row.appendChild(fname); row.appendChild(fsize); row.appendChild(rm);
     fileListEl.appendChild(row);
   }
 }
@@ -1450,6 +1797,166 @@ clearFilesBtn.addEventListener('click', () => {
   state.exemplarId = null;
   renderFileList(); renderExemplarSelect(); updateCounts();
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Image Inspector — zoom/pan modal with an optional ROI shimmer overlay.
+// The zoom/pan mechanics (wheel-zoom toward the cursor, clamped drag-pan,
+// synchronized before/after panes) are carried over from the pre-rework
+// CyberChef-style build, where they were already tuned and battle-tested;
+// only the trigger sites and the ROI overlay are new. Preserves the "old
+// workflow" ability to zoom into an image at import time, before
+// processing (Calibrate), and after processing (Process).
+// ═══════════════════════════════════════════════════════════════
+const inspectorModal = document.getElementById('inspectorModal');
+const inspectorTitle = document.getElementById('inspectorTitle');
+const inspectorZoomLevel = document.getElementById('inspectorZoomLevel');
+const inspectorZoomReset = document.getElementById('inspectorZoomReset');
+const zoomViewportBefore = document.getElementById('zoomViewportBefore');
+const zoomViewportAfter = document.getElementById('zoomViewportAfter');
+const zoomInnerBefore = document.getElementById('zoomInnerBefore');
+const zoomInnerAfter = document.getElementById('zoomInnerAfter');
+const previewBefore = document.getElementById('previewBefore');
+const previewAfter = document.getElementById('previewAfter');
+const previewBeforeMeta = document.getElementById('previewBeforeMeta');
+const previewAfterMeta = document.getElementById('previewAfterMeta');
+const roiHeat = document.getElementById('roiHeat');
+const roiShine = document.getElementById('roiShine');
+
+const inspectorZoom = { scale: 1, tx: 0, ty: 0 };
+let inspectorPanActive = false, inspectorPanLastX = 0, inspectorPanLastY = 0;
+
+function applyInspectorZoom() {
+  const t = `translate(${inspectorZoom.tx}px, ${inspectorZoom.ty}px) scale(${inspectorZoom.scale})`;
+  zoomInnerBefore.style.transform = t;
+  zoomInnerAfter.style.transform = t;
+  inspectorZoomLevel.textContent = Math.round(inspectorZoom.scale * 100) + '%';
+  inspectorZoomReset.style.display = (inspectorZoom.scale !== 1 || inspectorZoom.tx !== 0 || inspectorZoom.ty !== 0) ? 'inline-block' : 'none';
+}
+function resetInspectorZoom() {
+  inspectorZoom.scale = 1; inspectorZoom.tx = 0; inspectorZoom.ty = 0;
+  applyInspectorZoom();
+}
+function clampInspectorPan() {
+  // Allow panning until any corner of the (larger) image reaches the centre
+  // of the viewport: max offset = half the scaled rendered image dimension.
+  const renderedW = Math.max(previewBefore.clientWidth, previewAfter.clientWidth);
+  const renderedH = Math.max(previewBefore.clientHeight, previewAfter.clientHeight);
+  const maxPanX = (renderedW * inspectorZoom.scale) / 2;
+  const maxPanY = (renderedH * inspectorZoom.scale) / 2;
+  inspectorZoom.tx = Math.max(-maxPanX, Math.min(maxPanX, inspectorZoom.tx));
+  inspectorZoom.ty = Math.max(-maxPanY, Math.min(maxPanY, inspectorZoom.ty));
+}
+[zoomViewportBefore, zoomViewportAfter].forEach(vp => {
+  vp.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const prevScale = inspectorZoom.scale;
+    const newScale = Math.max(1, prevScale * factor);
+    if (newScale === prevScale) return;
+    // Keep the point under the cursor fixed while zooming.
+    const rect = vp.getBoundingClientRect();
+    const mx = e.clientX - (rect.left + rect.width / 2);
+    const my = e.clientY - (rect.top + rect.height / 2);
+    const ratio = newScale / prevScale;
+    inspectorZoom.tx = mx - (mx - inspectorZoom.tx) * ratio;
+    inspectorZoom.ty = my - (my - inspectorZoom.ty) * ratio;
+    inspectorZoom.scale = newScale;
+    if (inspectorZoom.scale === 1) { inspectorZoom.tx = 0; inspectorZoom.ty = 0; }
+    else clampInspectorPan();
+    applyInspectorZoom();
+  }, { passive: false });
+  vp.addEventListener('mousedown', e => {
+    if (inspectorZoom.scale <= 1) return;
+    inspectorPanActive = true; inspectorPanLastX = e.clientX; inspectorPanLastY = e.clientY;
+    zoomViewportBefore.classList.add('panning');
+    zoomViewportAfter.classList.add('panning');
+    e.preventDefault();
+  });
+});
+document.addEventListener('mousemove', e => {
+  if (!inspectorPanActive) return;
+  inspectorZoom.tx += e.clientX - inspectorPanLastX;
+  inspectorZoom.ty += e.clientY - inspectorPanLastY;
+  inspectorPanLastX = e.clientX; inspectorPanLastY = e.clientY;
+  clampInspectorPan();
+  applyInspectorZoom();
+});
+document.addEventListener('mouseup', () => {
+  if (!inspectorPanActive) return;
+  inspectorPanActive = false;
+  zoomViewportBefore.classList.remove('panning');
+  zoomViewportAfter.classList.remove('panning');
+});
+inspectorZoomReset.addEventListener('click', resetInspectorZoom);
+
+// Builds a full-resolution heatmap PNG data URL from every block's loss
+// (not just the worst one): normalizeBlockLoss (pure, unit-tested) does the
+// actual math; this just paints it, rendered at block-grid resolution and
+// upscaled with smoothing so it reads as a blurred mask rather than hard
+// tiles. Returns null if there's no loss to show (blocks missing, or a
+// perfect match).
+function buildRoiMaskUrl(blocks, W, H) {
+  const normalized = normalizeBlockLoss(blocks);
+  if (!normalized) return null;
+  const bw = normalized[0].w, bh = normalized[0].h;
+  const cols = Math.ceil(W / bw), rows = Math.ceil(H / bh);
+  const small = newCanvas(cols, rows);
+  const sctx = small.getContext('2d');
+  for (const b of normalized) {
+    sctx.fillStyle = `rgba(15,155,142,${b.alpha.toFixed(3)})`;
+    sctx.fillRect(Math.floor(b.x / bw), Math.floor(b.y / bh), 1, 1);
+  }
+  const big = newCanvas(W, H);
+  const bctx = big.getContext('2d');
+  bctx.imageSmoothingEnabled = true;
+  bctx.imageSmoothingQuality = 'high';
+  bctx.drawImage(small, 0, 0, W, H);
+  return big.toDataURL();
+}
+
+// Applies (or hides) the heatmap + masked-shine overlay on the "after"
+// pane only — loss lives in output pixel space, which "before" (the true
+// original) no longer shares once resize/orient have changed it.
+function applyRoiMask(url) {
+  if (!url) { roiHeat.hidden = true; roiShine.hidden = true; return; }
+  roiHeat.src = url;
+  roiHeat.hidden = false;
+  roiShine.style.maskImage = `url(${url})`;
+  roiShine.style.webkitMaskImage = `url(${url})`;
+  roiShine.hidden = false;
+}
+
+// frame: { canvas, label, meta }. Pass `single` alone for a one-pane view
+// (file list at import time); pass `before`+`after` for a two-pane
+// original-vs-final comparison (Calibrate, Process) — `before` is always
+// the true original, `after` the fully-processed result. `roiMaskUrl`
+// (from buildRoiMaskUrl) marks every lossy region on the "after" pane.
+function openInspector({ title, before, after, single, roiMaskUrl }) {
+  resetInspectorZoom();
+  inspectorTitle.textContent = title || '';
+  if (single) {
+    inspectorModal.classList.add('single-pane');
+    previewAfter.src = single.canvas.toDataURL();
+    previewAfterMeta.textContent = single.meta || '';
+    document.getElementById('inspectorAfterLabel').textContent = single.label || 'Image';
+    previewBefore.removeAttribute('src');
+    applyRoiMask(null);
+  } else {
+    inspectorModal.classList.remove('single-pane');
+    previewBefore.src = before.canvas.toDataURL();
+    previewBeforeMeta.textContent = before.meta || '';
+    document.getElementById('inspectorBeforeLabel').textContent = before.label || 'Original';
+    previewAfter.src = after.canvas.toDataURL();
+    previewAfterMeta.textContent = after.meta || '';
+    document.getElementById('inspectorAfterLabel').textContent = after.label || 'Final';
+    applyRoiMask(roiMaskUrl || null);
+  }
+  inspectorModal.classList.add('open');
+}
+function closeInspector() { inspectorModal.classList.remove('open'); }
+document.getElementById('inspectorClose').addEventListener('click', closeInspector);
+inspectorModal.addEventListener('click', e => { if (e.target === inspectorModal) closeInspector(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && inspectorModal.classList.contains('open')) closeInspector(); });
 
 // ═══════════════════════════════════════════════════════════════
 // Audit mode — read the set, touch nothing
@@ -1873,9 +2380,9 @@ async function recalcCalibratePreview() {
   `;
 
   const encodeView = document.getElementById('encodeDeltaView');
+  encodeView.innerHTML = '';
   if (stats) {
     const { beforeCanvas, afterCanvas } = renderLoupe(canvas, decodedCanvas, stats.worstBlock);
-    encodeView.innerHTML = '';
     const wrap = document.createElement('div');
     wrap.className = 'loupe-wrap';
     wrap.innerHTML = `<div class="notice">Worst-region loupe — highest-error 8×8 tile, magnified</div>`;
@@ -1900,8 +2407,33 @@ async function recalcCalibratePreview() {
     wrap.appendChild(flickerBtn);
     encodeView.appendChild(wrap);
   } else {
-    encodeView.innerHTML = '<div class="notice">PNG is lossless — no worst-region loupe to show.</div>';
+    const notice = document.createElement('div');
+    notice.className = 'notice';
+    notice.textContent = 'PNG is lossless — no worst-region loupe to show.';
+    encodeView.appendChild(notice);
   }
+
+  // One comparison, always original vs. the fully-processed final result —
+  // not an intermediate pipeline step — with every lossy region (not just
+  // the single worst block) marked as a normalized heatmap on the final
+  // pane. PNG has no loss, so no heatmap, but the comparison itself still
+  // holds: "final" for lossless output is the pre-encode canvas unchanged.
+  const compareBtn = document.createElement('button');
+  compareBtn.className = 'inspect-btn';
+  compareBtn.textContent = '🔍 View original vs final';
+  compareBtn.style.marginTop = '8px';
+  compareBtn.addEventListener('click', async () => {
+    const originalCanvas = await ensureSourceCanvas(entry);
+    const finalCanvas = decodedCanvas || canvas;
+    const roiMaskUrl = stats ? buildRoiMaskUrl(stats.blocks, canvas.width, canvas.height) : null;
+    openInspector({
+      title: entry.file.name,
+      before: { canvas: originalCanvas, label: 'Original', meta: `${originalCanvas.width}×${originalCanvas.height}` },
+      after: { canvas: finalCanvas, label: `Final (${fmtBytes(blob.size)})`, meta: stats ? `SSIM ${achievedSsim.toFixed(4)}` : 'lossless' },
+      roiMaskUrl,
+    });
+  });
+  encodeView.appendChild(compareBtn);
 
   updateRecipeJsonView();
 }
@@ -1922,15 +2454,44 @@ function renderLoupe(preCanvas, postCanvas, worstBlock) {
   return { beforeCanvas, afterCanvas };
 }
 
-// ── Save Recipe ──
-document.getElementById('saveRecipeBtn').addEventListener('click', () => {
-  const recipe = canonicalRecipe(state.draft);
-  recipe.createdDate = new Date().toISOString().slice(0, 10);
+// ── Save Recipe: also the recipe's bookmark. replaceState keeps the
+// address bar — and so any bookmark of it — in sync with the saved recipe
+// without piling up a history entry per save. Shared with the page-load
+// restore path below so "just saved" and "just opened a bookmark" apply a
+// recipe identically. ──
+function applySavedRecipe(recipe) {
   state.savedRecipe = recipe;
   document.getElementById('processRecipeView').textContent = JSON.stringify(recipe, null, 2);
   tabs.process.disabled = false;
   updateCounts();
+  // Saving fresh from Calibrate is always the modern format; only the
+  // hash-restore path (below) re-shows this for an actual legacy recipe.
+  // Without this reset, a stale "old format" notice from an earlier
+  // bookmark restore would keep showing after a normal save.
+  document.getElementById('legacyRecipeNotice').style.display = 'none';
+}
+document.getElementById('saveRecipeBtn').addEventListener('click', () => {
+  const recipe = canonicalRecipe(state.draft);
+  recipe.createdDate = new Date().toISOString().slice(0, 10);
+  applySavedRecipe(recipe);
+  history.replaceState(null, '', recipeToHash(recipe));
   setMode('process');
+});
+
+const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
+copyRecipeLinkBtn.addEventListener('click', async () => {
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+    const original = copyRecipeLinkBtn.textContent;
+    copyRecipeLinkBtn.textContent = '✓ Copied';
+    setTimeout(() => { copyRecipeLinkBtn.textContent = original; }, 1500);
+  } catch {
+    // Clipboard access can be unavailable (permissions, older browser); the
+    // link is already sitting in the address bar either way, so fall back
+    // to just surfacing it directly rather than failing silently.
+    window.prompt('Copy this link:', url);
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1959,9 +2520,39 @@ function renderResultsTable(results) {
       <td>${r.quality != null ? Math.round(r.quality * 100) : '—'}</td>
       <td>${r.ssim != null ? r.ssim.toFixed(4) : '—'}</td>
       <td>${statusText}</td>
+      <td></td>
     `;
+    if (r.outBytes) {
+      const btn = document.createElement('button');
+      btn.className = 'inspect-btn';
+      btn.textContent = '🔍 Inspect';
+      btn.addEventListener('click', () => inspectProcessResult(r));
+      tr.lastElementChild.appendChild(btn);
+    } else {
+      tr.lastElementChild.textContent = '—';
+    }
     resultsTableBody.appendChild(tr);
   }
+}
+
+// Original vs. final, same as Calibrate: "before" is the source file as
+// imported (cached on the entry, decoded once), "after" is the actual
+// output bytes decoded back — the real final result, not a reconstructed
+// intermediate. Every lossy region (not just the worst block) is marked as
+// a normalized heatmap on the final pane, from the block stats already
+// computed and retained for this result during the batch run.
+async function inspectProcessResult(r) {
+  const entry = state.files.find(f => f.file.name === r.name);
+  if (!entry) return;
+  const originalCanvas = await ensureSourceCanvas(entry);
+  const afterCanvas = await decodeBlobToCanvas(new Blob([r.outBytes], { type: FORMAT_MIME[r.format] || 'image/jpeg' }));
+  const roiMaskUrl = r.stats ? buildRoiMaskUrl(r.stats.blocks, afterCanvas.width, afterCanvas.height) : null;
+  openInspector({
+    title: r.name,
+    before: { canvas: originalCanvas, label: 'Original', meta: `${originalCanvas.width}×${originalCanvas.height}` },
+    after: { canvas: afterCanvas, label: `Final (${fmtBytes(r.after)})`, meta: r.ssim != null ? `SSIM ${r.ssim.toFixed(4)}` : 'lossless' },
+    roiMaskUrl,
+  });
 }
 
 runBatchBtn.addEventListener('click', async () => {
@@ -1991,6 +2582,13 @@ runBatchBtn.addEventListener('click', async () => {
         name: entry.file.name, before: srcBytes.length, after: out.outBytes.length,
         quality: out.deltas.encode.achieved.quality, ssim: out.deltas.encode.achieved.ssim,
         unsatisfiable: out.unsatisfiable, error: null,
+        // Kept for on-demand Inspector use (see inspectProcessResult) —
+        // outBytes is already resident in memory via zipEntries at this
+        // point in the run, so retaining one more reference to it here
+        // costs nothing extra; format+stats are needed to redecode and to
+        // place the ROI shimmer.
+        outBytes: out.outBytes, format: recipe.encode && recipe.encode.format || 'jpeg',
+        stats: out.deltas.encode.achieved.stats,
       });
       zipEntries[out.outName] = [out.outBytes, { mtime: zipMtime }];
     } catch (err) {
@@ -2035,6 +2633,31 @@ downloadZipBtn.addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
+
+// ── Restore a saved recipe from the URL: a bookmark drops you straight
+// into Process, ready to drop files, Run Batch, and review — no need to
+// revisit Audit or Calibrate to get back to a recipe already settled on.
+// A pre-rework (legacy) recipe still lands here too — it's migrated as far
+// as the current fixed pipeline allows, with anything that couldn't be
+// carried forward surfaced in a notice rather than silently dropped. ──
+(function restoreRecipeFromHash() {
+  const result = recipeFromHash(location.hash);
+  if (!result) return;
+  const { recipe, legacy, notes } = result;
+  if (!recipe.createdDate) recipe.createdDate = new Date().toISOString().slice(0, 10);
+  applySavedRecipe(recipe);
+  const legacyNotice = document.getElementById('legacyRecipeNotice');
+  if (legacy) {
+    const intro = 'This bookmark used ImageChef’s old, pre-rework recipe format. It’s been migrated as closely as the current recipe model allows.';
+    legacyNotice.innerHTML = notes.length
+      ? `${escHtml(intro)}<ul style="margin:4px 0 0 18px">${notes.map(n => `<li>${escHtml(n)}</li>`).join('')}</ul>`
+      : escHtml(intro);
+    legacyNotice.style.display = '';
+  } else {
+    legacyNotice.style.display = 'none';
+  }
+  setMode('process');
+})();
 
 </script>
 </body>

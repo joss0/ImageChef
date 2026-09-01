@@ -19,20 +19,20 @@ assert.ok(block, 'ENGINE-LIB block not found in index.html');
 
 const lib = new Function(block[1] + `
   return {
-    canonicalRecipe, recipeIdentity, SLOT_KEYS,
+    canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
-    computeBlockStats,
+    computeBlockStats, normalizeBlockLoss,
     injectPngText, readPngText, stripPngColorChunks,
     writeMinimalJpegExif, injectJpegMinimalExif,
   };
 `)();
 
 const {
-  canonicalRecipe, recipeIdentity,
+  canonicalRecipe, recipeIdentity, recipeToHash, recipeFromHash, migrateLegacyRecipe,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
-  computeBlockStats,
+  computeBlockStats, normalizeBlockLoss,
   injectPngText, readPngText, stripPngColorChunks,
   writeMinimalJpegExif, injectJpegMinimalExif,
 } = lib;
@@ -48,6 +48,128 @@ test('canonicalRecipe drops unknown keys and keeps createdDate', () => {
   const r = { bogus: 1, orient: 0, createdDate: '2026-07-13' };
   const c = canonicalRecipe(r);
   assert.deepEqual(c, { orient: 0, createdDate: '2026-07-13' });
+});
+
+// ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
+test('recipeToHash / recipeFromHash round-trip a recipe unchanged', () => {
+  const recipe = {
+    orient: 5,
+    resize: { intent: 'fit', dimensions: { width: 1920, height: 1080 } },
+    encode: { format: 'jpeg', ssimTarget: 0.987, maxBytes: 400000 },
+    createdDate: '2026-09-01',
+  };
+  const hash = recipeToHash(recipe);
+  assert.match(hash, /^#recipe=/);
+  const result = recipeFromHash(hash);
+  assert.equal(result.legacy, false);
+  assert.deepEqual(result.notes, []);
+  assert.deepEqual(result.recipe, canonicalRecipe(recipe));
+});
+
+test('recipeToHash / recipeFromHash round-trip non-ASCII stamp text', () => {
+  const recipe = { stamp: { template: '© 2026 — café ★', position: 'br', style: {} } };
+  const hash = recipeToHash(recipe);
+  assert.deepEqual(recipeFromHash(hash).recipe, canonicalRecipe(recipe));
+});
+
+test('recipeFromHash drops unknown keys, same as canonicalRecipe', () => {
+  const hash = recipeToHash({ orient: 2, bogus: 'nope' });
+  assert.deepEqual(recipeFromHash(hash).recipe, { orient: 2 });
+});
+
+test('recipeFromHash returns null for a missing, malformed, or tampered hash', () => {
+  assert.equal(recipeFromHash(''), null);
+  assert.equal(recipeFromHash('#recipe='), null);
+  assert.equal(recipeFromHash('#recipe=not-valid-base64!!!'), null);
+  assert.equal(recipeFromHash('#somethingElse=abc'), null);
+  assert.equal(recipeFromHash(undefined), null);
+});
+
+// ── Legacy (pre-rework, ordered op-list) recipes: migrate, never vanish ───
+// Fixture mirrors the old app's own defaultRecipe(): resize, compress,
+// format, strip, rename, all enabled — see old-index.html (git history,
+// pre "Rework ImageChef..." commit) for the original op shapes.
+function legacyStep(op, config, enabled = true) {
+  return { uid: 'x', op, enabled, config };
+}
+
+test('migrateLegacyRecipe maps the old default recipe onto today\'s slots', () => {
+  const legacy = [
+    legacyStep('resize', { mode: 'fit', w: 1920, h: 1080, percent: 75, longest: 1600 }),
+    legacyStep('compress', { mode: 'per', perKB: 500, totalMB: 20 }),
+    legacyStep('format', { output: 'jpeg' }),
+    legacyStep('strip', {}),
+    legacyStep('rename', { pattern: '{name}' }),
+  ];
+  const { recipe, notes } = migrateLegacyRecipe(legacy);
+  assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 1920, height: 1080 } });
+  assert.equal(recipe.encode.maxBytes, 500 * 1024);
+  assert.equal(recipe.encode.format, 'jpeg');
+  assert.equal(recipe.orient, undefined); // no rotate step present
+  // Only the genuinely unmappable step (rename) produces a note.
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /Rename/);
+});
+
+test('migrateLegacyRecipe: old "exact" resize mode did the same aspect-fit math as "fit"', () => {
+  const { recipe } = migrateLegacyRecipe([legacyStep('resize', { mode: 'exact', w: 800, h: 600 })]);
+  assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 800, height: 600 } });
+});
+
+test('migrateLegacyRecipe: "longest edge" becomes a fit into a same-side square box', () => {
+  const { recipe } = migrateLegacyRecipe([legacyStep('resize', { mode: 'longest', longest: 1600 })]);
+  assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 1600, height: 1600 } });
+});
+
+test('migrateLegacyRecipe: rotate/flip maps onto the exact same D4 orient state as the live UI would produce', () => {
+  // 90 CW is ORIENT_TAP.rotateCW composed onto identity.
+  const cw90 = migrateLegacyRecipe([legacyStep('rotate', { degrees: 90, flipH: false, flipV: false })]);
+  assert.equal(cw90.recipe.orient, composeOrientStates(ORIENT_TAP.rotateCW, ORIENT_IDENTITY));
+  // flipH alone.
+  const flipH = migrateLegacyRecipe([legacyStep('rotate', { degrees: 0, flipH: true, flipV: false })]);
+  assert.equal(flipH.recipe.orient, composeOrientStates(ORIENT_TAP.flipH, ORIENT_IDENTITY));
+  // flipV alone: mirroring vertically is a flip + 180, same identity the app itself relies on.
+  const flipV = migrateLegacyRecipe([legacyStep('rotate', { degrees: 0, flipH: false, flipV: true })]);
+  assert.equal(flipV.recipe.orient, composeOrientStates(ORIENT_TAP.flipV, ORIENT_IDENTITY));
+  // No rotate step at all → orient left unset (identity default), not forced to 0.
+  assert.equal(migrateLegacyRecipe([]).recipe.orient, undefined);
+});
+
+test('migrateLegacyRecipe drops what has no fixed-recipe equivalent, with a note for each, never silently', () => {
+  const legacy = [
+    legacyStep('resize', { mode: 'percent', percent: 50 }),
+    legacyStep('compress', { mode: 'total', totalMB: 20 }),
+    legacyStep('format', { output: 'keep' }),
+    legacyStep('grayscale', { method: 'luminance' }),
+    legacyStep('unknownFutureOp', {}),
+  ];
+  const { recipe, notes } = migrateLegacyRecipe(legacy);
+  assert.equal(recipe.resize, undefined);
+  assert.equal(recipe.encode.maxBytes, undefined);
+  assert.equal(recipe.encode.format, 'jpeg'); // sensible default, not left unset
+  assert.equal(notes.length, 5); // percent, total, keep, grayscale, unknown op
+  assert.ok(notes.some(n => /percent/.test(n)));
+  assert.ok(notes.some(n => /total/i.test(n)));
+  assert.ok(notes.some(n => /Keep original/.test(n)));
+  assert.ok(notes.some(n => /Grayscale/.test(n)));
+  assert.ok(notes.some(n => /unknownFutureOp/.test(n)));
+});
+
+test('migrateLegacyRecipe skips disabled steps exactly as the old UI did', () => {
+  const { recipe, notes } = migrateLegacyRecipe([legacyStep('rotate', { degrees: 90 }, false)]);
+  assert.equal(recipe.orient, undefined);
+  assert.deepEqual(notes, []);
+});
+
+test('recipeFromHash detects a legacy (array-shaped) hash and migrates it, reporting notes', () => {
+  const legacyBytes = new TextEncoder().encode(JSON.stringify([legacyStep('rename', { pattern: '{name}-{index}' })]));
+  let binary = '';
+  for (const b of legacyBytes) binary += String.fromCharCode(b);
+  const hash = '#recipe=' + btoa(binary);
+  const result = recipeFromHash(hash);
+  assert.equal(result.legacy, true);
+  assert.equal(result.notes.length, 1);
+  assert.match(result.notes[0], /Rename/);
 });
 
 // ── Orientation: closed group of 8 ────────────────────────────────────────
@@ -149,6 +271,66 @@ test('computeBlockStats: more different images score lower SSIM than less differ
   const statsSmall = computeBlockStats(a, bSmall, W, H, 8);
   const statsBig = computeBlockStats(a, bBig, W, H, 8);
   assert.ok(statsSmall.meanSsim > statsBig.meanSsim);
+});
+
+// ── normalizeBlockLoss: the ROI heatmap's mask math ───────────────────────
+test('normalizeBlockLoss returns null with no blocks or no loss', () => {
+  assert.equal(normalizeBlockLoss(null), null);
+  assert.equal(normalizeBlockLoss([]), null);
+  assert.equal(normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 0 }]), null);
+});
+
+test('normalizeBlockLoss scales every block relative to the batch max, capped at maxAlpha (gamma=1, linear)', () => {
+  const blocks = [
+    { x: 0, y: 0, w: 8, h: 8, sad: 100 },  // the max — should hit maxAlpha exactly
+    { x: 8, y: 0, w: 8, h: 8, sad: 50 },   // half the max — half the alpha, at gamma=1
+    { x: 0, y: 8, w: 8, h: 8, sad: 0 },    // no loss — zero alpha, not dropped
+  ];
+  const out = normalizeBlockLoss(blocks, 0.8, 1);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].alpha, 0.8);
+  assert.equal(out[1].alpha, 0.4);
+  assert.equal(out[2].alpha, 0);
+  // Geometry passes through unchanged — the mask must land on the right pixels.
+  assert.deepEqual({ x: out[1].x, y: out[1].y, w: out[1].w, h: out[1].h }, { x: 8, y: 0, w: 8, h: 8 });
+});
+
+test('normalizeBlockLoss defaults maxAlpha so the mask never fully obscures the image', () => {
+  const out = normalizeBlockLoss([{ x: 0, y: 0, w: 8, h: 8, sad: 1 }]);
+  assert.equal(out[0].alpha, 0.85);
+  assert.ok(out[0].alpha < 1);
+});
+
+test('normalizeBlockLoss biases through a power law: moderate loss is suppressed well below linear, the max is untouched', () => {
+  const blocks = [
+    { x: 0, y: 0, w: 8, h: 8, sad: 100 },
+    { x: 8, y: 0, w: 8, h: 8, sad: 50 }, // half the max SAD
+  ];
+  const linear = normalizeBlockLoss(blocks, 0.8, 1);
+  const gamma2 = normalizeBlockLoss(blocks, 0.8, 2);
+  // The worst block always hits maxAlpha regardless of gamma (1^g === 1).
+  assert.equal(linear[0].alpha, 0.8);
+  assert.equal(gamma2[0].alpha, 0.8);
+  // A gamma > 1 pulls the half-max block's tint down, not up — that's what
+  // keeps ordinary, moderate compression loss from washing the image green.
+  assert.ok(gamma2[1].alpha < linear[1].alpha);
+  assert.equal(gamma2[1].alpha, 0.5 ** 2 * 0.8);
+  // The library default (gamma=2.2) suppresses it further still.
+  const defaulted = normalizeBlockLoss(blocks, 0.8);
+  assert.ok(defaulted[1].alpha < gamma2[1].alpha);
+});
+
+test('normalizeBlockLoss on real computeBlockStats output: the worst block reaches maxAlpha', () => {
+  const W = 16, H = 16;
+  const a = makeFrame(W, H, () => [120, 120, 120]);
+  const b = makeFrame(W, H, (x, y) => (x >= 8 && y >= 8) ? [0, 0, 0] : [120, 120, 120]);
+  const stats = computeBlockStats(a, b, W, H, 8);
+  const mask = normalizeBlockLoss(stats.blocks);
+  const worst = mask.find(m => m.x === 8 && m.y === 8);
+  assert.equal(worst.alpha, 0.85);
+  // Untouched blocks carry zero loss, not omitted from the mask.
+  const untouched = mask.find(m => m.x === 0 && m.y === 0);
+  assert.equal(untouched.alpha, 0);
 });
 
 // ── PNG tEXt injection round-trips ────────────────────────────────────────

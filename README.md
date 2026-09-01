@@ -40,7 +40,10 @@ over whatever order the fields happen to be in.
   to an optional byte cap; a conflict between the two is reported by name,
   not silently resolved, and the run continues for the rest of the batch.
   Output is a ZIP (optionally with a `manifest.json` built by the same report
-  generator Audit uses).
+  generator Audit uses). Saving a recipe writes it into the page URL, so the
+  saved state is a bookmark: open it and you land straight on Process with
+  the recipe already loaded — drop images, Run Batch, review, download,
+  with no need to revisit Audit or Calibrate.
 
 ## Notable behavior
 
@@ -58,6 +61,29 @@ over whatever order the fields happen to be in.
 - **Determinism**: the same input set and recipe produce a byte-identical
   ZIP on repeat runs — `{date}` and `{hash:8}` stamp tokens are frozen at
   Save Recipe / read from file content, never wall-clock at Process time.
+- **Image Inspector**: a zoom/pan viewer for eyeballing full images, not just
+  the worst-region loupe's crop — click a file's thumbnail at import time, or
+  "View original vs final" during Calibrate, or "Inspect" on a Process
+  result. The comparison is always the source file as imported against the
+  actual fully-processed result, never an intermediate pipeline step. Where
+  loss is known (every block's error, not just the single worst one), it's
+  marked on the final image as a normalized heatmap, power-law biased so
+  ordinary moderate loss doesn't wash the image in tint — only the
+  genuinely worst regions stay strongly marked. The unaffected image is
+  what you see almost all the time; the mask only flashes on for about
+  half a second every three seconds, so it's findable without being a
+  standing distraction.
+- **Exemplar selection**: clicking a file in the left-hand list (its
+  thumbnail included) sets it as the Calibrate exemplar, kept in sync with
+  the "Tune on" dropdown — no need to hunt for it by name in a list.
+- **Old recipe bookmarks still work.** A link saved under the pre-rework,
+  CyberChef-style ordered op list (see `imagechef-outline.md`) is detected
+  and migrated: rotate/flip, a fixed-size or longest-edge resize, a
+  per-image byte cap, and jpeg/png/webp format all carry over exactly. What
+  has no equivalent in the fixed pipeline — a percent resize (relative to
+  each image, not a fixed box), a total-batch byte budget, "keep original"
+  format, custom output filenames, grayscale — is named in an on-screen
+  notice rather than silently dropped or guessed at.
 
 ## Supported input formats
 
