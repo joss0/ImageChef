@@ -476,7 +476,7 @@ function basenameNoExt(name) { return name.replace(/\.[^./\\]+$/, ''); }
 // and the engine itself never iterates recipe keys — every slot is read by
 // name — so processing is order-insensitive by construction, not by
 // discipline.
-const SLOT_KEYS = ['orient', 'resize', 'sharpen', 'stamp', 'flatten', 'color', 'metadata', 'encode', 'manifest'];
+const SLOT_KEYS = ['orient', 'resize', 'sharpen', 'stamp', 'flatten', 'color', 'metadata', 'encode', 'output', 'manifest'];
 
 function canonicalRecipe(r) {
   const out = {};
@@ -486,6 +486,57 @@ function canonicalRecipe(r) {
 }
 
 function recipeIdentity(r) { return JSON.stringify(canonicalRecipe(r)); }
+
+// ── Templates: one token vocabulary for the stamp and the output name ─────
+// tokens: { name, seq, hash, date, today, width, height } per image, plus
+// { created, count } for the batch-level zip name. `{seq:N}` zero-pads to N
+// digits and `{hash:N}` takes the first N hex chars. A token the caller
+// didn't supply is left as written, so a typo shows up in the output
+// instead of silently vanishing.
+function resolveTemplate(template, tokens) {
+  return String(template == null ? '' : template).replace(/\{(\w+)(?::(\d+))?\}/g, (m, key, n) => {
+    if (!(key in tokens)) return m;
+    const v = tokens[key];
+    if (v == null) return '';
+    if (key === 'seq' && n) return String(v).padStart(parseInt(n, 10), '0');
+    if (key === 'hash' && n) return String(v).slice(0, parseInt(n, 10));
+    if (n) return m;
+    return String(v);
+  });
+}
+
+const DEFAULT_OUTPUT_NAME = '{name}';
+const DEFAULT_ZIP_NAME = 'imagechef-{today}';
+
+// Characters that are illegal or non-portable in filenames across Windows,
+// macOS and Linux, plus trailing dots/spaces (Windows strips them itself,
+// so a name ending in one would come back different from what we wrote).
+const ILLEGAL_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1F]/g;
+function sanitizeFilename(s) {
+  return String(s == null ? '' : s).replace(ILLEGAL_FILENAME_CHARS, '').replace(/[. ]+$/, '').trim();
+}
+
+// Resolve an output-name template to a safe basename (no extension — the
+// encode format decides that). Sanitization happens on the *resolved*
+// result, never the template, so `{seq:3}` keeps its colon. An empty or
+// all-illegal result falls back to the source name so a bad template can
+// never yield ".jpg".
+function resolveOutputBasename(template, tokens) {
+  const raw = sanitizeFilename(resolveTemplate(template || DEFAULT_OUTPUT_NAME, tokens));
+  return raw || sanitizeFilename(tokens.name) || 'image';
+}
+
+// Two images whose templates resolve to the same name would silently
+// overwrite each other in the zip; suffix the later one instead. `used` is
+// a Set the caller threads through the batch, in batch order.
+function uniqueName(base, ext, used) {
+  let candidate = base + '.' + ext;
+  for (let i = 2; used.has(candidate); i++) candidate = `${base}-${i}.${ext}`;
+  used.add(candidate);
+  return candidate;
+}
+
+function fmtDateUTC(ms) { return new Date(ms).toISOString().slice(0, 10); }
 
 // ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
 // UTF-8 safe (a stamp template can carry non-ASCII text), and the fragment
@@ -508,7 +559,8 @@ function recipeToHash(recipe) {
 // recipe — that always degrades to *something* plus an explanation,
 // rather than silently vanishing.
 function recipeFromHash(hash) {
-  const m = /^#recipe=(.+)$/.exec(hash || '');
+  // `#r=` is what the pre-rework build wrote; `#recipe=` is the current key.
+  const m = /^#(?:recipe|r)=(.+)$/.exec(hash || '');
   if (!m) return null;
   try {
     const binary = atob(m[1]);
@@ -520,6 +572,12 @@ function recipeFromHash(hash) {
       return { recipe, legacy: true, notes };
     }
     if (!parsed || typeof parsed !== 'object') return null;
+    if (Array.isArray(parsed.recipe)) {
+      // The last pre-rework format wrapped the step list in an object that
+      // also carried the zip name, the rename pattern and the frozen date.
+      const { recipe, notes } = migrateLegacyRecipe(parsed.recipe, { zip: parsed.zip, rename: parsed.rename, frozen: parsed.frozen });
+      return { recipe, legacy: true, notes };
+    }
     return { recipe: canonicalRecipe(parsed), legacy: false, notes: [] };
   } catch {
     return null;
@@ -596,9 +654,24 @@ function orientStateIndexFromMatrix(m) {
 // drop is reported in `notes` — never silent — so the UI can tell the
 // user exactly what didn't make it across and why, rather than them
 // discovering it later as an unexplained difference in output.
-function migrateLegacyRecipe(steps) {
+// The old rename tokens map onto today's: `{index}` was the 1-based batch
+// position zero-padded to 3 digits, which is `{seq:3}` now; `{name}`,
+// `{date}` and `{width}x{height}` kept their meaning. The old zip name's
+// `{date}` was the download-time date, which is `{today}`.
+function migrateLegacyNamePattern(pattern) {
+  return String(pattern).replace(/\{index\}/g, '{seq:3}');
+}
+function migrateLegacyZipPattern(pattern) {
+  return String(pattern).replace(/\{date\}/g, '{today}').replace(/\.zip$/i, '');
+}
+
+// `extras` is the object-shaped legacy payload's non-step fields: a
+// top-level `rename` pattern (which took precedence over the step's own in
+// the old app), the `zip` name, and the `frozen` recipe date.
+function migrateLegacyRecipe(steps, extras) {
   const recipe = {};
   const notes = [];
+  extras = extras || {};
   if (!Array.isArray(steps)) return { recipe: canonicalRecipe(recipe), notes };
 
   for (const step of steps) {
@@ -651,7 +724,7 @@ function migrateLegacyRecipe(steps) {
       case 'strip':
         break; // no-op then, matches the strip-all default now
       case 'rename':
-        notes.push(`Rename ("${config.pattern || '{name}'}"): custom output filenames aren’t configurable anymore — dropped. Output names are derived automatically.`);
+        recipe.output = { ...recipe.output, name: migrateLegacyNamePattern(config.pattern || '{name}') };
         break;
       case 'grayscale':
         notes.push('Grayscale: color/tone operations were dropped from the fixed pipeline — no equivalent slot exists.');
@@ -660,6 +733,10 @@ function migrateLegacyRecipe(steps) {
         notes.push(`Unrecognized step "${step.op}", skipped.`);
     }
   }
+
+  if (typeof extras.rename === 'string' && extras.rename) recipe.output = { ...recipe.output, name: migrateLegacyNamePattern(extras.rename) };
+  if (typeof extras.zip === 'string' && extras.zip) recipe.output = { ...recipe.output, zip: migrateLegacyZipPattern(extras.zip) };
+  if (typeof extras.frozen === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(extras.frozen)) recipe.createdDate = extras.frozen;
 
   if (!recipe.encode || !recipe.encode.format) recipe.encode = { ...recipe.encode, format: 'jpeg' };
   return { recipe: canonicalRecipe(recipe), notes };
@@ -1303,15 +1380,8 @@ function applySharpen(canvas, amount) {
 }
 
 // ── stamp ──
-function resolveStampTemplate(template, tokens) {
-  return template
-    .replace(/\{date\}/g, tokens.date || '')
-    .replace(/\{seq\}/g, String(tokens.seq))
-    .replace(/\{name\}/g, tokens.name)
-    .replace(/\{hash:(\d+)\}/g, (_, n) => tokens.hash.slice(0, parseInt(n, 10)));
-}
 function applyStamp(canvas, stampCfg, tokens) {
-  const text = resolveStampTemplate(stampCfg.template, tokens);
+  const text = resolveTemplate(stampCfg.template, tokens);
   if (!text) return canvas;
   const out = newCanvas(canvas.width, canvas.height);
   const ctx = out.getContext('2d');
@@ -1465,8 +1535,34 @@ async function injectRetainedMetadata(bytes, format, retainedValues) {
   return bytes; // WebP metadata retention is out of scope (see README)
 }
 
+// ── template tokens ──
+// One vocabulary for the stamp and the output name (see resolveTemplate).
+// `date` is the image's own date of record — its EXIF capture date, else
+// the file's modification date — and `today` is the run date. Neither is
+// the recipe's save date: a copyright line or an archive name wants the
+// date the picture was taken or the date the batch was made, not the day
+// someone happened to click Save Recipe.
+function dateOfRecord(file, srcBytes, ext, today) {
+  const captured = (ext === 'jpg' || ext === 'jpeg') ? readJpegDateTimeOriginal(srcBytes) : null;
+  if (captured) return captured;
+  if (file && file.lastModified) return fmtDateUTC(file.lastModified);
+  return today;
+}
+function buildTokens(file, srcBytes, ext, batchCtx, hash, canvas) {
+  const today = batchCtx.today || fmtDateUTC(Date.now());
+  return {
+    name: basenameNoExt(file.name),
+    seq: batchCtx.seqOf(file.name),
+    hash,
+    date: dateOfRecord(file, srcBytes, ext, today),
+    today,
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
 // ── the fixed pipeline ──
-// batchCtx: { seqOf(name), createdDate }. tokens.hash is filled in by the
+// batchCtx: { seqOf(name), today }. tokens.hash is filled in by the
 // caller from the file's precomputed content hash.
 //
 // Split out from runPipeline so the Process-mode Inspector can reconstruct
@@ -1500,7 +1596,9 @@ async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash)
   if (recipe.sharpen) canvas = applySharpen(canvas, recipe.sharpen);
 
   const name = basenameNoExt(file.name);
-  const tokens = { date: recipe.createdDate || '', seq: batchCtx.seqOf(file.name), name, hash };
+  // Stamp is rendered in output space, so the canvas here already has the
+  // final dimensions {width}x{height} refer to.
+  const tokens = buildTokens(file, srcBytes, ext, batchCtx, hash, canvas);
   if (recipe.stamp && recipe.stamp.template) canvas = applyStamp(canvas, recipe.stamp, tokens);
 
   const format = (recipe.encode && recipe.encode.format) || 'jpeg';
@@ -1511,11 +1609,11 @@ async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash)
 
   deltas.color = recipe.color ? 'sRGB (tagged)' : 'sRGB (untagged — canvas output is always sRGB)';
 
-  return { canvas, deltas, name, format };
+  return { canvas, deltas, name, format, tokens };
 }
 
 async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
-  const { canvas, deltas, name, format } = await buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash);
+  const { canvas, deltas, format, tokens } = await buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash);
 
   const retainedValues = gatherRetainedValues(srcBytes, ext, recipe.metadata && recipe.metadata.retain);
   deltas.metadata = { available: gatherRetainedValues(srcBytes, ext, RETAINABLE_FIELDS), retained: retainedValues };
@@ -1534,7 +1632,9 @@ async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
   }
   outBytes = await injectRetainedMetadata(outBytes, format, retainedValues);
 
-  const outName = name + '.' + FORMAT_EXT[format];
+  // The extension is the encode format's, never the template's: a name is
+  // a name, and the format decides what kind of file it is.
+  const outName = resolveOutputBasename(recipe.output && recipe.output.name, tokens) + '.' + FORMAT_EXT[format];
   return { outBytes, outName, width: canvas.width, height: canvas.height, deltas, unsatisfiable: encodeResult.unsatisfiable };
 }
 
@@ -1598,13 +1698,16 @@ const state = {
   auditReport: null,
   processResults: null,
   lastZip: null,
+  lastZipName: null,
 };
 
 function seqOf(name) {
   const sorted = [...state.files].map(f => f.file.name).sort();
   return sorted.indexOf(name) + 1;
 }
-const batchCtx = { seqOf };
+// `today` is set when a batch run starts and cleared after, so every image
+// in one run sees the same run date even across a midnight boundary.
+const batchCtx = { seqOf, today: null };
 
 // ── Theme ──
 const themeSelect = document.getElementById('themeSelect');
@@ -2172,6 +2275,19 @@ slotSections.innerHTML = `
   </div>
 
   <div class="slot-section">
+    <div class="slot-head"><span class="slot-name">Output</span><span class="slot-tag">names the file after encode</span></div>
+    <div class="slot-body">
+      <label class="checkbox-row"><input type="checkbox" id="outputEnabled"> Include this slot</label>
+      <div id="outputFields" style="display:flex;flex-direction:column;gap:10px">
+        <div class="field-row"><label>File name</label><input type="text" id="outputName" value="{name}" style="width:240px" aria-label="Output file name template"><span class="unit">+ format extension</span></div>
+        <div class="field-row"><label>ZIP name</label><input type="text" id="outputZip" value="imagechef-{today}" style="width:240px" aria-label="ZIP file name template"><span class="unit">.zip</span></div>
+        <div class="notice">Tokens: {name} {seq} {seq:3} {date} {today} {hash:8} {width}x{height} — {date} is the image’s EXIF capture date, else its file date; {today} is the run date. The ZIP name also takes {created} (recipe save date) and {count}.</div>
+        <div class="notice" id="outputNameView"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Manifest</span></div>
     <div class="slot-body">
       <label class="checkbox-row"><input type="checkbox" id="manifestEnabled"> Emit manifest.json in the output zip</label>
@@ -2235,6 +2351,22 @@ function syncStampField() {
 }
 ['stampTemplate','stampPosition','stampFontSize','stampColor'].forEach(id => document.getElementById(id).addEventListener('change', debounce(syncStampField, 150)));
 document.getElementById('stampOpacity').addEventListener('input', debounce(() => { document.getElementById('stampOpacityLabel').textContent = document.getElementById('stampOpacity').value; syncStampField(); }, 150));
+
+// The templates are stored as typed; only their *resolved* results are
+// sanitized (see resolveOutputBasename), so `{seq:3}` keeps its colon.
+function readOutputFields() {
+  return {
+    name: document.getElementById('outputName').value.trim() || DEFAULT_OUTPUT_NAME,
+    zip: document.getElementById('outputZip').value.trim() || DEFAULT_ZIP_NAME,
+  };
+}
+setSlotPresence('output', 'outputEnabled', 'outputFields', readOutputFields);
+function syncOutputField() {
+  if (!state.draft.output) return;
+  state.draft.output = readOutputFields();
+  scheduleRecalc(); updateRecipeJsonView();
+}
+['outputName', 'outputZip'].forEach(id => document.getElementById(id).addEventListener('change', debounce(syncOutputField, 150)));
 
 setSlotPresence('flatten', 'flattenEnabled', 'flattenFields', () => ({ color: document.getElementById('flattenColor').value }));
 document.getElementById('flattenColor').addEventListener('change', () => { if (state.draft.flatten) { state.draft.flatten.color = document.getElementById('flattenColor').value; scheduleRecalc(); updateRecipeJsonView(); } });
@@ -2330,12 +2462,18 @@ async function recalcCalibratePreview() {
   if (state.draft.sharpen) canvas = applySharpen(canvas, state.draft.sharpen);
   if (myToken !== previewToken) return;
 
+  const previewTokens = buildTokens(entry.file, srcBytes, entry.ext, batchCtx, await entry.hashPromise, canvas);
+  if (myToken !== previewToken) return;
   if (state.draft.stamp && state.draft.stamp.template) {
-    const tokens = { date: new Date().toISOString().slice(0,10), seq: seqOf(entry.file.name), name: basenameNoExt(entry.file.name), hash: (await entry.hashPromise).slice(0,8) };
-    canvas = applyStamp(canvas, state.draft.stamp, tokens);
+    canvas = applyStamp(canvas, state.draft.stamp, previewTokens);
   }
 
   const format = state.draft.encode.format;
+  // ── output name delta view: the exemplar's resolved name ──
+  const outputView = document.getElementById('outputNameView');
+  const previewZip = sanitizeFilename(resolveTemplate((state.draft.output && state.draft.output.zip) || DEFAULT_ZIP_NAME,
+    { date: previewTokens.today, today: previewTokens.today, created: previewTokens.today, count: state.files.length })) || 'imagechef';
+  outputView.textContent = `${entry.file.name} → ${resolveOutputBasename(state.draft.output && state.draft.output.name, previewTokens)}.${FORMAT_EXT[format]}   ·   ${previewZip}.zip`;
   const flattenColor = state.draft.flatten && state.draft.flatten.color;
   const needsFlatten = !!flattenColor || (format === 'jpeg' && canvasHasAlpha(canvas));
   if (needsFlatten) canvas = applyFlatten(canvas, flattenColor || '#ffffff');
@@ -2513,8 +2651,9 @@ function renderResultsTable(results) {
     const statusClass = r.error ? 'status-error' : (r.unsatisfiable ? 'status-unsatisfiable' : 'status-ok');
     tr.className = statusClass;
     const statusText = r.error ? ('Error: ' + escHtml(r.error)) : (r.unsatisfiable ? escHtml(r.unsatisfiable) : 'OK');
+    const outNote = r.outName && r.outName !== r.name ? `<div style="font-size:0.78em;opacity:0.7">→ ${escHtml(r.outName)}</div>` : '';
     tr.innerHTML = `
-      <td>${escHtml(r.name)}</td>
+      <td>${escHtml(r.name)}${outNote}</td>
       <td>${r.before != null ? fmtBytes(r.before) : '—'}</td>
       <td>${r.after != null ? fmtBytes(r.after) : '—'}</td>
       <td>${r.quality != null ? Math.round(r.quality * 100) : '—'}</td>
@@ -2567,6 +2706,8 @@ runBatchBtn.addEventListener('click', async () => {
   // zip" true. DOS zip timestamps can't represent years before 1980, so this is the
   // recipe's frozen date rather than the (invalid) Unix epoch.
   const zipMtime = new Date(recipe.createdDate + 'T00:00:00Z');
+  batchCtx.today = fmtDateUTC(Date.now());
+  const usedNames = new Set();
 
   for (let i = 0; i < state.files.length; i++) {
     const entry = state.files[i];
@@ -2578,8 +2719,9 @@ runBatchBtn.addEventListener('click', async () => {
       const out = await runPipeline(entry.file, srcBytes, entry.ext, recipe, batchCtx, hash);
       totalBefore += srcBytes.length;
       totalAfter += out.outBytes.length;
+      const outName = uniqueName(basenameNoExt(out.outName), extOf(out.outName), usedNames);
       results.push({
-        name: entry.file.name, before: srcBytes.length, after: out.outBytes.length,
+        name: entry.file.name, outName, before: srcBytes.length, after: out.outBytes.length,
         quality: out.deltas.encode.achieved.quality, ssim: out.deltas.encode.achieved.ssim,
         unsatisfiable: out.unsatisfiable, error: null,
         // Kept for on-demand Inspector use (see inspectProcessResult) —
@@ -2590,7 +2732,7 @@ runBatchBtn.addEventListener('click', async () => {
         outBytes: out.outBytes, format: recipe.encode && recipe.encode.format || 'jpeg',
         stats: out.deltas.encode.achieved.stats,
       });
-      zipEntries[out.outName] = [out.outBytes, { mtime: zipMtime }];
+      zipEntries[outName] = [out.outBytes, { mtime: zipMtime }];
     } catch (err) {
       results.push({ name: entry.file.name, before: srcBytes.length, after: null, quality: null, ssim: null, unsatisfiable: null, error: err.message || String(err) });
     }
@@ -2613,6 +2755,10 @@ runBatchBtn.addEventListener('click', async () => {
 
   const zipBytes = fflate.zipSync(zipEntries, { level: 6 });
   state.lastZip = zipBytes;
+  // Named at run time, not download time: the run is the event of record.
+  const zipTokens = { date: batchCtx.today, today: batchCtx.today, created: recipe.createdDate, count: results.length };
+  state.lastZipName = (sanitizeFilename(resolveTemplate((recipe.output && recipe.output.zip) || DEFAULT_ZIP_NAME, zipTokens)) || 'imagechef') + '.zip';
+  batchCtx.today = null;
   state.processResults = results;
   renderResultsTable(results);
   progressBarFill.style.width = '100%';
@@ -2629,7 +2775,7 @@ downloadZipBtn.addEventListener('click', () => {
   const blob = new Blob([state.lastZip], { type: 'application/zip' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `imagechef-${state.savedRecipe.createdDate}.zip`;
+  a.download = state.lastZipName || `imagechef-${state.savedRecipe.createdDate}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
