@@ -59,10 +59,9 @@ and the tool did not need.
 ### The default recipe
 
 An empty record is a valid recipe and a poor first impression. A fresh page
-starts from the email preset — fit inside 1600 px, JPEG under 800 KB on a white
+starts from the email preset — fit inside 2048 px, JPEG under 100 KB on a white
 background, exact duplicates skipped — so the first Process run does something
-sensible. Every slot stays optional; a "Reset to email default" button returns
-to it.
+sensible. Every slot stays optional.
 
 ### Dates of record
 

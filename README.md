@@ -37,8 +37,7 @@ over whatever order the fields happen to be in.
   "quality" control is a calibration instrument only — what the recipe
   carries is the **achieved SSIM** against the pre-encode raster, not the
   quality number. A fresh page starts from the **email preset** (fit inside
-  1600 px, JPEG under 800 KB, white background, exact duplicates skipped);
-  "Reset to email default" returns to it.
+  2048 px, JPEG under 100 KB, white background, exact duplicates skipped).
 - **Process** — runs the current recipe over the whole batch. Each image
   binary-searches encoder quality to hit the calibrated SSIM target subject
   to an optional byte cap; a conflict between the two is reported by name,
@@ -62,7 +61,7 @@ over whatever order the fields happen to be in.
   light on premultiplied alpha, so a transparent neighbor never drags an
   opaque edge toward black.
   `fit` never enlarges a smaller source unless the slot says `upscale: true`
-  (an explicit checkbox), so the 1600 px email default leaves small photos
+  (an explicit checkbox), so the 2048 px email default leaves small photos
   at their native size.
 - **Metadata** defaults to strip-all, including the color-space tag the
   browser's own encoder embeds regardless of what was asked for. Retaining

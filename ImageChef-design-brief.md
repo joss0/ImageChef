@@ -29,7 +29,7 @@ Where is the recipe saved?
 > save button. A bookmark is a saved recipe.
 
 What does a fresh page start with?
-> The email preset: fit inside 1600 px, JPEG under 800 KB, white
+> The email preset: fit inside 2048 px, JPEG under 100 KB, white
 > background, exact duplicates skipped. A sensible demonstration, not a
 > requirement — every slot stays optional.
 
