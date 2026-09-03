@@ -355,7 +355,9 @@
           <pre class="recipe-json" id="recipeJsonView"></pre>
           <div class="btn-row" style="padding:0">
             <button class="btn-secondary" id="copyRecipeLinkBtnCalibrate">🔗 Copy bookmark link</button>
+            <button class="btn-secondary" id="resetRecipeBtn">✉️ Reset to email default</button>
           </div>
+          <div class="notice">Starts as the email preset — fit inside 1600 px, JPEG under 800 KB, white background, exact duplicates skipped. Every slot is optional.</div>
         </div>
       </div>
     </section>
@@ -492,6 +494,20 @@ function canonicalRecipe(r) {
 }
 
 function recipeIdentity(r) { return JSON.stringify(canonicalRecipe(r)); }
+
+// The default recipe a fresh page starts from: the pre-rework build's
+// one-click "Email preset" — fit inside 1600 px, JPEG under 800 KB on a
+// white background, exact duplicates skipped — chosen as a sensible
+// demonstration recipe. Every slot stays optional; nothing here is load-
+// bearing for the engine. `orient: 0` is ORIENT_IDENTITY, kept as the
+// literal so this block stays self-contained.
+const DEFAULT_RECIPE = Object.freeze({
+  orient: 0,
+  resize: { intent: 'fit', dimensions: { width: 1600, height: 1600 } },
+  flatten: { color: '#ffffff' },
+  encode: { format: 'jpeg', maxBytes: 800000 },
+  dedup: { by: 'name+size' },
+});
 
 // ── Templates: one token vocabulary for the stamp and the output name ─────
 // tokens: { name, seq, hash, date, today, width, height } per image, plus
@@ -2276,19 +2292,19 @@ slotSections.innerHTML = `
   <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Resize</span><span class="slot-tag">the only honest thumbnail</span></div>
     <div class="slot-body">
-      <label class="checkbox-row"><input type="checkbox" id="resizeEnabled"> Include this slot</label>
+      <label class="checkbox-row"><input type="checkbox" id="resizeEnabled" checked> Include this slot</label>
       <div id="resizeFields" style="display:flex;flex-direction:column;gap:10px">
         <div class="field-row">
           <label>Intent</label>
           <select id="resizeIntent">
-            <option value="fit">fit (aspect preserved, inside box)</option>
+            <option value="fit" selected>fit (aspect preserved, inside box)</option>
             <option value="cover">cover (fill box, center-trimmed)</option>
             <option value="exact-pad">exact-pad (exact size, padded)</option>
           </select>
         </div>
         <div class="field-row">
-          <label>Width</label><input type="number" id="resizeWidth" min="1" max="20000" value="1920"><span class="unit">px</span>
-          <label style="min-width:20px">H</label><input type="number" id="resizeHeight" min="1" max="20000" value="1080"><span class="unit">px</span>
+          <label>Width</label><input type="number" id="resizeWidth" min="1" max="20000" value="1600"><span class="unit">px</span>
+          <label style="min-width:20px">H</label><input type="number" id="resizeHeight" min="1" max="20000" value="1600"><span class="unit">px</span>
         </div>
       </div>
       <div class="delta-view" id="resizeDeltaView"></div>
@@ -2335,7 +2351,7 @@ slotSections.innerHTML = `
   <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Flatten</span><span class="slot-tag">explicit alpha handling</span></div>
     <div class="slot-body">
-      <label class="checkbox-row"><input type="checkbox" id="flattenEnabled"> Include this slot</label>
+      <label class="checkbox-row"><input type="checkbox" id="flattenEnabled" checked> Include this slot</label>
       <div class="field-row" id="flattenFields"><label>Background</label><input type="color" id="flattenColor" value="#ffffff"></div>
       <div class="notice">If omitted and the output format can't hold transparency (JPEG), white is used as a necessity — but selecting JPEG below auto-includes this slot so that choice stays explicit in the saved recipe.</div>
     </div>
@@ -2379,7 +2395,7 @@ slotSections.innerHTML = `
         <span class="unit" id="encodeQualityLabel">85</span>
       </div>
       <div class="field-row">
-        <label>Max bytes</label><input type="number" id="encodeMaxBytes" min="0" placeholder="none"><span class="unit">bytes (optional)</span>
+        <label>Max bytes</label><input type="number" id="encodeMaxBytes" min="0" placeholder="none" value="800000"><span class="unit">bytes (optional)</span>
       </div>
       <div class="notice">Drag Quality until the achieved SSIM and worst-region loupe look right. What gets saved is the <strong>achieved SSIM</strong>, not this number — Process re-derives quality per image to hit that same score.</div>
       <div class="stat-grid" id="encodeStats"></div>
@@ -2580,6 +2596,11 @@ setSlotPresence('manifest', 'manifestEnabled', null, () => true);
 document.getElementById('orientReset').addEventListener('click', () => { state.draft.orient = ORIENT_IDENTITY; scheduleRecalc(); updateRecipeJsonView(); });
 
 updateRecipeJsonView();
+// A fresh page starts from the email preset (see DEFAULT_RECIPE), not an
+// empty recipe — loadRecipeIntoCalibrate sets every control to match. This
+// runs before hashSyncArmed flips on, so a clean load still leaves the URL
+// untouched even though the draft itself is no longer empty.
+loadRecipeIntoCalibrate(DEFAULT_RECIPE);
 // Control wiring above is done and the default draft is in place — from
 // here on, every draft change should be reflected in the URL hash.
 state.hashSyncArmed = true;
@@ -2852,6 +2873,7 @@ const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
 copyRecipeLinkBtn.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtn));
 const copyRecipeLinkBtnCalibrate = document.getElementById('copyRecipeLinkBtnCalibrate');
 copyRecipeLinkBtnCalibrate.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtnCalibrate));
+document.getElementById('resetRecipeBtn').addEventListener('click', () => loadRecipeIntoCalibrate(DEFAULT_RECIPE));
 
 // ═══════════════════════════════════════════════════════════════
 // Process mode — the batch run. Deterministic. Zip out, optional manifest.

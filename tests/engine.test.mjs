@@ -19,7 +19,7 @@ assert.ok(block, 'ENGINE-LIB block not found in index.html');
 
 const lib = new Function(block[1] + `
   return {
-    canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
+    canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe, DEFAULT_RECIPE,
     resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
     partitionDuplicates,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
@@ -31,7 +31,7 @@ const lib = new Function(block[1] + `
 `)();
 
 const {
-  canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
+  canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe, DEFAULT_RECIPE,
   resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
   partitionDuplicates,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
@@ -52,6 +52,28 @@ test('canonicalRecipe drops unknown keys and keeps createdDate', () => {
   const r = { bogus: 1, orient: 0, createdDate: '2026-07-13' };
   const c = canonicalRecipe(r);
   assert.deepEqual(c, { orient: 0, createdDate: '2026-07-13' });
+});
+
+// ── DEFAULT_RECIPE: the email preset a fresh page starts from ────────────
+test('DEFAULT_RECIPE is already canonical, in SLOT_KEYS order', () => {
+  const c = canonicalRecipe(DEFAULT_RECIPE);
+  assert.deepEqual(c, DEFAULT_RECIPE);
+  assert.deepEqual(Object.keys(c), SLOT_KEYS.filter(k => DEFAULT_RECIPE[k] !== undefined));
+});
+
+test('DEFAULT_RECIPE carries exactly orient, resize, flatten, encode, dedup', () => {
+  assert.deepEqual(Object.keys(DEFAULT_RECIPE).sort(), ['dedup', 'encode', 'flatten', 'orient', 'resize'].sort());
+});
+
+test('DEFAULT_RECIPE round-trips through recipeToHash/recipeFromHash', () => {
+  const result = recipeFromHash(recipeToHash(DEFAULT_RECIPE));
+  assert.equal(result.legacy, false);
+  assert.deepEqual(result.notes, []);
+  assert.deepEqual(result.recipe, canonicalRecipe(DEFAULT_RECIPE));
+});
+
+test('DEFAULT_RECIPE is frozen', () => {
+  assert.equal(Object.isFrozen(DEFAULT_RECIPE), true);
 });
 
 // ── Recipe <-> URL hash: a saved recipe is bookmarkable ───────────────────
