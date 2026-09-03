@@ -39,6 +39,9 @@ over whatever order the fields happen to be in.
   binary-searches encoder quality to hit the calibrated SSIM target subject
   to an optional byte cap; a conflict between the two is reported by name,
   not silently resolved, and the run continues for the rest of the batch.
+  Images are processed three at a time; output names, collision suffixes,
+  the results table and the ZIP entries are assigned in file order once
+  the pool drains, so parallelism changes the wall clock, never the output.
   Output is a ZIP (optionally with a `manifest.json` built by the same report
   generator Audit uses). Saving a recipe writes it into the page URL, so the
   saved state is a bookmark: open it and you land straight on Process with
