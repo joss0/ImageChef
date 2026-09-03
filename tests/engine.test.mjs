@@ -20,7 +20,7 @@ assert.ok(block, 'ENGINE-LIB block not found in index.html');
 const lib = new Function(block[1] + `
   return {
     canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe, DEFAULT_RECIPE,
-    resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
+    resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME, fitScale,
     partitionDuplicates,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
@@ -32,7 +32,7 @@ const lib = new Function(block[1] + `
 
 const {
   canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe, DEFAULT_RECIPE,
-  resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
+  resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME, fitScale,
   partitionDuplicates,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
@@ -144,14 +144,27 @@ test('migrateLegacyRecipe: rename tokens map onto today\'s — {index} was 3-dig
   assert.deepEqual(notes, []);
 });
 
-test('migrateLegacyRecipe: old "exact" resize mode did the same aspect-fit math as "fit"', () => {
+test('migrateLegacyRecipe: old "exact" resize mode did the same aspect-fit math as "fit", and always scaled to the box', () => {
   const { recipe } = migrateLegacyRecipe([legacyStep('resize', { mode: 'exact', w: 800, h: 600 })]);
-  assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 800, height: 600 } });
+  assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 800, height: 600 }, upscale: true });
 });
 
-test('migrateLegacyRecipe: "longest edge" becomes a fit into a same-side square box', () => {
+test('migrateLegacyRecipe: "longest edge" becomes a fit into a same-side square box; "Allow upscaling" carries over', () => {
   const { recipe } = migrateLegacyRecipe([legacyStep('resize', { mode: 'longest', longest: 1600 })]);
   assert.deepEqual(recipe.resize, { intent: 'fit', dimensions: { width: 1600, height: 1600 } });
+  const up = migrateLegacyRecipe([legacyStep('resize', { mode: 'longest', longest: 1600, allowUpscale: true })]);
+  assert.deepEqual(up.recipe.resize, { intent: 'fit', dimensions: { width: 1600, height: 1600 }, upscale: true });
+  const fitNoUp = migrateLegacyRecipe([legacyStep('resize', { mode: 'fit', w: 1000, h: 1000, allowUpscale: false })]);
+  assert.equal(fitNoUp.recipe.resize.upscale, undefined);
+});
+
+// ── Resize: fit never enlarges unless asked ──────────────────────────────
+test('fitScale shrinks to fit, never enlarges by default, and enlarges only with upscale', () => {
+  assert.equal(fitScale(3200, 2400, 1600, 1600, false), 0.5);   // larger source: shrink
+  assert.equal(fitScale(640, 480, 1600, 1600, false), 1);       // smaller source: untouched
+  assert.equal(fitScale(640, 480, 1600, 1600, true), 2.5);      // explicit upscale: fill the box
+  assert.equal(fitScale(1600, 1600, 1600, 1600, false), 1);     // exact fit
+  assert.equal(fitScale(1600, 400, 800, 800, true), 0.5);       // wide source, limiting axis wins
 });
 
 test('migrateLegacyRecipe: rotate/flip maps onto the exact same D4 orient state as the live UI would produce', () => {

@@ -744,9 +744,13 @@ function migrateLegacyRecipe(steps, extras) {
       case 'resize': {
         if (config.mode === 'fit' || config.mode === 'exact') {
           recipe.resize = { intent: 'fit', dimensions: { width: config.w || 1920, height: config.h || 1080 } };
+          // Old "fit" enlarged only with its "Allow upscaling" box ticked;
+          // old "exact" always scaled to the box.
+          if (config.mode === 'exact' || config.allowUpscale) recipe.resize.upscale = true;
         } else if (config.mode === 'longest') {
           const side = config.longest || 1600;
           recipe.resize = { intent: 'fit', dimensions: { width: side, height: side } };
+          if (config.allowUpscale) recipe.resize.upscale = true;
         } else if (config.mode === 'percent') {
           notes.push('Resize: "percent" mode scaled relative to each image’s own size and has no fixed-recipe equivalent — dropped. Set an explicit size in Calibrate.');
         } else {
@@ -1132,6 +1136,18 @@ function injectJpegMinimalExif(bytes, fields) {
   return out;
 }
 
+// ── Resize: the scale `fit` applies ──────────────────────────────────────
+// `fit` places the image inside the box, aspect preserved, and never
+// enlarges a smaller source unless the slot says `upscale: true`. The
+// pre-rework build made enlargement an explicit, visible choice ("Allow
+// upscaling"), and a default recipe that fits inside 1600 px must not blow
+// a 640 px photo up to 1600. `cover` and `exact-pad` are unaffected: they
+// promise a box size and must scale to deliver it.
+function fitScale(srcW, srcH, boxW, boxH, upscale) {
+  const s = Math.min(boxW / srcW, boxH / srcH);
+  return upscale ? s : Math.min(s, 1);
+}
+
 // ===== ENGINE-LIB-END =====
 
 // ═══════════════════════════════════════════════════════════════
@@ -1395,7 +1411,8 @@ function applyResize(canvas, resizeCfg) {
     return out;
   }
   // 'fit'
-  const scale = Math.min(W / srcW, H / srcH);
+  const scale = fitScale(srcW, srcH, W, H, !!resizeCfg.upscale);
+  if (scale === 1) return canvas; // already inside the box and not enlarging: untouched
   const dw = Math.max(1, Math.round(srcW * scale)), dh = Math.max(1, Math.round(srcH * scale));
   return resizeCanvasTo(canvas, dw, dh);
 }
@@ -2306,6 +2323,7 @@ slotSections.innerHTML = `
           <label>Width</label><input type="number" id="resizeWidth" min="1" max="20000" value="1600"><span class="unit">px</span>
           <label style="min-width:20px">H</label><input type="number" id="resizeHeight" min="1" max="20000" value="1600"><span class="unit">px</span>
         </div>
+        <label class="checkbox-row"><input type="checkbox" id="resizeUpscale"> Enlarge smaller images to fill the box (fit only — never enlarged otherwise)</label>
       </div>
       <div class="delta-view" id="resizeDeltaView"></div>
     </div>
@@ -2482,11 +2500,20 @@ function setSlotPresence(key, enabledCheckboxId, fieldsWrapId, defaultValue) {
   sync();
 }
 
-setSlotPresence('resize', 'resizeEnabled', 'resizeFields', () => ({ intent: document.getElementById('resizeIntent').value, dimensions: { width: parseInt(document.getElementById('resizeWidth').value) || 1920, height: parseInt(document.getElementById('resizeHeight').value) || 1080 } }));
-document.getElementById('resizeIntent').addEventListener('change', () => { if (state.draft.resize) { state.draft.resize.intent = document.getElementById('resizeIntent').value; scheduleRecalc(); updateRecipeJsonView(); } });
-['resizeWidth', 'resizeHeight'].forEach(id => document.getElementById(id).addEventListener('change', () => {
+// `upscale` is written only when set, so a recipe that never asked to
+// enlarge stays minimal (and identical to one saved before the flag existed).
+function readResizeFields() {
+  const r = {
+    intent: document.getElementById('resizeIntent').value,
+    dimensions: { width: parseInt(document.getElementById('resizeWidth').value) || 1, height: parseInt(document.getElementById('resizeHeight').value) || 1 },
+  };
+  if (document.getElementById('resizeUpscale').checked) r.upscale = true;
+  return r;
+}
+setSlotPresence('resize', 'resizeEnabled', 'resizeFields', readResizeFields);
+['resizeIntent', 'resizeWidth', 'resizeHeight', 'resizeUpscale'].forEach(id => document.getElementById(id).addEventListener('change', () => {
   if (!state.draft.resize) return;
-  state.draft.resize.dimensions = { width: parseInt(document.getElementById('resizeWidth').value) || 1, height: parseInt(document.getElementById('resizeHeight').value) || 1 };
+  state.draft.resize = readResizeFields();
   scheduleRecalc(); updateRecipeJsonView();
 }));
 
@@ -2631,6 +2658,7 @@ function loadRecipeIntoCalibrate(recipe) {
     setValue('resizeWidth', (draft.resize.dimensions && draft.resize.dimensions.width) || 1920);
     setValue('resizeHeight', (draft.resize.dimensions && draft.resize.dimensions.height) || 1080);
   }
+  setChecked('resizeUpscale', !!(draft.resize && draft.resize.upscale));
   if (draft.sharpen !== undefined) {
     setValue('sharpenAmount', draft.sharpen);
     document.getElementById('sharpenAmountLabel').textContent = Number(draft.sharpen).toFixed(2);

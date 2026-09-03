@@ -93,7 +93,7 @@ Every apparent ordering problem collapses into one of three shapes:
 | Slot | Value | Notes |
 |---|---|---|
 | `orient` | one of 8 D4 states | UI: successive rotate/flip taps compose into the state |
-| `resize` | `{ intent, dimensions }` | Intents: `fit`, `cover`, `exact-pad`. Named intents, not user-assembled compositions. Resample in linear light with premultiplied alpha. |
+| `resize` | `{ intent, dimensions, upscale? }` | Intents: `fit`, `cover`, `exact-pad`. Named intents, not user-assembled compositions. `fit` never enlarges a smaller source unless `upscale: true`. Resample in linear light with premultiplied alpha. |
 | `sharpen` | amount | Applied immediately after resample. |
 | `stamp` | template + position + style | Tokens (shared with `output`): `{name}`, `{seq}` / `{seq:N}`, `{date}`, `{today}`, `{hash:N}`, `{width}`, `{height}`. One mechanism covers serial-numbering, copyright lines, and DRAFT marks. |
 | `flatten` | background color | Alpha handling is explicit, not incidental. |

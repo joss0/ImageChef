@@ -64,8 +64,14 @@ What happens to the source file's EXIF orientation tag?
 ## Chapter 3: Resize
 
 What are the resize intents?
-> `fit` (inside a box, aspect preserved), `cover` (fill a box, aspect preserved,
+> `fit` (inside a box, aspect preserved; never enlarges a smaller source unless
+> the slot says `upscale: true`), `cover` (fill a box, aspect preserved,
 > center-trimmed), `exact-pad` (exact dimensions, padded with the flatten color).
+
+Does `fit` enlarge a small photo to reach the box?
+> Not unless asked. Enlargement invents pixels; it is an explicit, visible
+> choice, never a silent default. `cover` and `exact-pad` promise a size and
+> scale to deliver it.
 
 May the user compose scale-then-trim manually?
 > No. Composition is ordering-reasoning in disguise. Name the intent instead.

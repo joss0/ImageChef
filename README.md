@@ -61,6 +61,9 @@ over whatever order the fields happen to be in.
   user-assembled compose-your-own scale+crop. Resampling happens in linear
   light on premultiplied alpha, so a transparent neighbor never drags an
   opaque edge toward black.
+  `fit` never enlarges a smaller source unless the slot says `upscale: true`
+  (an explicit checkbox), so the 1600 px email default leaves small photos
+  at their native size.
 - **Metadata** defaults to strip-all, including the color-space tag the
   browser's own encoder embeds regardless of what was asked for. Retaining
   copyright/artist/description/capture-date is opt-in and by name; GPS is
