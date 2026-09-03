@@ -1699,6 +1699,12 @@ const state = {
   processResults: null,
   lastZip: null,
   lastZipName: null,
+  // True after a bookmark restore whose recipe carries an encode.ssimTarget:
+  // the Calibrate preview then searches quality to *meet* that target on the
+  // exemplar (setting the slider to what it found) instead of overwriting the
+  // target with whatever the slider's current quality happens to achieve.
+  // Cleared the moment the user moves the quality slider themselves.
+  pinnedSsimTarget: false,
 };
 
 function seqOf(name) {
@@ -2407,6 +2413,7 @@ encodeMaxBytesInput.addEventListener('change', () => {
   scheduleRecalc(); updateRecipeJsonView();
 });
 document.getElementById('encodeQualityPreview').addEventListener('input', debounce(() => {
+  state.pinnedSsimTarget = false;
   document.getElementById('encodeQualityLabel').textContent = document.getElementById('encodeQualityPreview').value;
   scheduleRecalc();
 }, 150));
@@ -2423,6 +2430,66 @@ setSlotPresence('manifest', 'manifestEnabled', null, () => true);
 document.getElementById('orientReset').addEventListener('click', () => { state.draft.orient = ORIENT_IDENTITY; scheduleRecalc(); updateRecipeJsonView(); });
 
 updateRecipeJsonView();
+
+// ── Recipe -> Calibrate: make the draft and every control match a recipe ──
+// Used by the bookmark-restore path so a restored recipe is editable in
+// Calibrate exactly as it was saved, not just displayed in Process. Fields
+// are set directly rather than by dispatching 'change' events, because the
+// encode-format handler has a side effect (auto-enabling flatten for JPEG)
+// that would add a slot the recipe didn't have.
+function setChecked(id, on) { document.getElementById(id).checked = !!on; }
+function setValue(id, v) { document.getElementById(id).value = v; }
+function loadRecipeIntoCalibrate(recipe) {
+  const r = canonicalRecipe(recipe);
+  const draft = JSON.parse(JSON.stringify(r));
+  delete draft.createdDate;              // Save Recipe stamps a fresh one
+  if (draft.orient === undefined) draft.orient = ORIENT_IDENTITY;
+  if (!draft.encode || !draft.encode.format) draft.encode = { ...draft.encode, format: 'jpeg' };
+  state.draft = draft;
+
+  const slotFields = { resize: 'resizeFields', stamp: 'stampFields', output: 'outputFields', flatten: 'flattenFields' };
+  for (const [key, id] of Object.entries({ resize: 'resizeEnabled', sharpen: 'sharpenEnabled', stamp: 'stampEnabled', output: 'outputEnabled', flatten: 'flattenEnabled', color: 'colorEnabled', manifest: 'manifestEnabled' })) {
+    setChecked(id, draft[key] !== undefined);
+    if (slotFields[key]) document.getElementById(slotFields[key]).style.display = draft[key] !== undefined ? '' : 'none';
+  }
+  if (draft.resize) {
+    setValue('resizeIntent', draft.resize.intent || 'fit');
+    setValue('resizeWidth', (draft.resize.dimensions && draft.resize.dimensions.width) || 1920);
+    setValue('resizeHeight', (draft.resize.dimensions && draft.resize.dimensions.height) || 1080);
+  }
+  if (draft.sharpen !== undefined) {
+    setValue('sharpenAmount', draft.sharpen);
+    document.getElementById('sharpenAmountLabel').textContent = Number(draft.sharpen).toFixed(2);
+  }
+  if (draft.stamp) {
+    setValue('stampTemplate', draft.stamp.template || '');
+    setValue('stampPosition', draft.stamp.position || 'bottom-right');
+    setValue('stampFontSize', draft.stamp.fontSize || 24);
+    setValue('stampColor', draft.stamp.color || '#ffffff');
+    const op = draft.stamp.opacity == null ? 0.85 : draft.stamp.opacity;
+    setValue('stampOpacity', op);
+    document.getElementById('stampOpacityLabel').textContent = String(op);
+  }
+  if (draft.output) {
+    setValue('outputName', draft.output.name || DEFAULT_OUTPUT_NAME);
+    setValue('outputZip', draft.output.zip || DEFAULT_ZIP_NAME);
+  }
+  if (draft.flatten) setValue('flattenColor', draft.flatten.color || '#ffffff');
+
+  const retain = (draft.metadata && draft.metadata.retain) || [];
+  setChecked('metaCopyright', retain.includes('copyright'));
+  setChecked('metaArtist', retain.includes('artist'));
+  setChecked('metaDescription', retain.includes('description'));
+  setChecked('metaDatetime', retain.includes('datetime'));
+
+  setValue('encodeFormat', draft.encode.format);
+  encodeQualityRow.style.display = draft.encode.format === 'png' ? 'none' : '';
+  setValue('encodeMaxBytes', draft.encode.maxBytes != null ? draft.encode.maxBytes : '');
+  state.pinnedSsimTarget = draft.encode.ssimTarget != null && draft.encode.format !== 'png';
+
+  updateRecipeJsonView();
+  scheduleRecalc();
+}
 
 // ── live preview / delta views ──
 async function recalcCalibratePreview() {
@@ -2495,21 +2562,38 @@ async function recalcCalibratePreview() {
   }
 
   // ── encode delta view (this is the "you are the search" calibration step) ──
-  const q = parseInt(document.getElementById('encodeQualityPreview').value) / 100;
   const mime = FORMAT_MIME[format];
   const preData = getRGBA(canvas).data;
   const W = canvas.width, H = canvas.height;
-  const blob = await canvasToBlobAsync(canvas, mime, format === 'png' ? 1 : q);
-  if (myToken !== previewToken) return;
-  let achievedSsim = 1, decodedCanvas = null, stats = null;
-  if (format !== 'png') {
+  let blob, achievedSsim = 1, decodedCanvas = null, stats = null;
+  const pinned = state.pinnedSsimTarget && format !== 'png' && state.draft.encode.ssimTarget != null;
+  if (pinned) {
+    // A restored recipe's target is the truth; find the quality that meets
+    // it on this exemplar (same search Process runs per image) and move the
+    // slider there, so the instruments show the bookmark's own calibration.
+    const solved = await solveEncode(canvas, format, { ssimTarget: state.draft.encode.ssimTarget, maxBytes: state.draft.encode.maxBytes });
+    if (myToken !== previewToken) return;
+    blob = solved.blob;
+    achievedSsim = solved.achieved.ssim;
+    stats = solved.achieved.stats;
     decodedCanvas = await decodeBlobToCanvas(blob);
     if (myToken !== previewToken) return;
-    stats = computeBlockStats(preData, getRGBA(decodedCanvas).data, W, H, 8);
-    achievedSsim = stats.meanSsim;
+    const qPct = Math.round((solved.achieved.quality || 0) * 100);
+    document.getElementById('encodeQualityPreview').value = qPct;
+    document.getElementById('encodeQualityLabel').textContent = String(qPct);
+  } else {
+    const q = parseInt(document.getElementById('encodeQualityPreview').value) / 100;
+    blob = await canvasToBlobAsync(canvas, mime, format === 'png' ? 1 : q);
+    if (myToken !== previewToken) return;
+    if (format !== 'png') {
+      decodedCanvas = await decodeBlobToCanvas(blob);
+      if (myToken !== previewToken) return;
+      stats = computeBlockStats(preData, getRGBA(decodedCanvas).data, W, H, 8);
+      achievedSsim = stats.meanSsim;
+    }
+    state.draft.encode = { ...state.draft.encode, ssimTarget: format === 'png' ? undefined : achievedSsim };
+    if (state.draft.encode.ssimTarget === undefined) delete state.draft.encode.ssimTarget;
   }
-  state.draft.encode = { ...state.draft.encode, ssimTarget: format === 'png' ? undefined : achievedSsim };
-  if (state.draft.encode.ssimTarget === undefined) delete state.draft.encode.ssimTarget;
 
   document.getElementById('encodeStats').innerHTML = `
     <div class="stat"><div class="k">Before</div><div class="v">${fmtBytes(srcBytes.length)}</div></div>
@@ -2792,6 +2876,9 @@ downloadZipBtn.addEventListener('click', () => {
   const { recipe, legacy, notes } = result;
   if (!recipe.createdDate) recipe.createdDate = new Date().toISOString().slice(0, 10);
   applySavedRecipe(recipe);
+  // The bookmark lands on Process, but Calibrate must hold the same recipe
+  // so it can be adjusted and re-saved rather than rebuilt from defaults.
+  loadRecipeIntoCalibrate(recipe);
   const legacyNotice = document.getElementById('legacyRecipeNotice');
   if (legacy) {
     const intro = 'This bookmark used ImageChef’s old, pre-rework recipe format. It’s been migrated as closely as the current recipe model allows.';
