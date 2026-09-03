@@ -270,7 +270,7 @@
   <div class="mode-tabs" role="tablist" aria-label="Mode">
     <button class="mode-tab active" id="tabAudit" role="tab">Audit</button>
     <button class="mode-tab" id="tabCalibrate" role="tab">Calibrate</button>
-    <button class="mode-tab" id="tabProcess" role="tab" disabled>Process</button>
+    <button class="mode-tab" id="tabProcess" role="tab">Process</button>
   </div>
   <select class="theme-select" id="themeSelect" style="margin-left:auto" aria-label="Color theme" title="Color theme">
     <option value="system">🖥️ System</option>
@@ -349,7 +349,7 @@
         <div class="slot-body">
           <pre class="recipe-json" id="recipeJsonView"></pre>
           <div class="btn-row" style="padding:0">
-            <button class="btn-primary" id="saveRecipeBtn">💾 Save Recipe → enables Process</button>
+            <button class="btn-secondary" id="copyRecipeLinkBtnCalibrate">🔗 Copy bookmark link</button>
           </div>
         </div>
       </div>
@@ -361,8 +361,9 @@
         <div class="slot-head"><span class="slot-name">Batch run</span></div>
         <div class="slot-body">
           <pre class="recipe-json" id="processRecipeView"></pre>
-          <div class="notice">This recipe is saved in the page URL — bookmark it (or copy the link below) to come
-            straight back here with the recipe already loaded: drop images, Run Batch, review, download.</div>
+          <div class="notice">This is the recipe you're building in Calibrate — it's mirrored into the page URL
+            as you edit it, so bookmarking (or copying the link below) brings you straight back here with the
+            recipe already loaded: drop images, Run Batch, review, download.</div>
           <div class="notice warn" id="legacyRecipeNotice" style="display:none"></div>
           <div class="btn-row" style="padding:0">
             <button class="btn-primary" id="runBatchBtn">🍳 Run Batch</button>
@@ -1693,8 +1694,7 @@ const state = {
   files: [],           // { id, file, ext, bytes(lazy), hash(lazy promise), dims(lazy) }
   mode: 'audit',
   exemplarId: null,
-  draft: {},           // working recipe while calibrating (canonical field names)
-  savedRecipe: null,   // frozen recipe (includes createdDate) once "Save Recipe" is clicked
+  draft: {},           // working recipe while calibrating (canonical field names) — this IS the recipe
   auditReport: null,
   processResults: null,
   lastZip: null,
@@ -1705,6 +1705,14 @@ const state = {
   // target with whatever the slider's current quality happens to achieve.
   // Cleared the moment the user moves the quality slider themselves.
   pinnedSsimTarget: false,
+  // Hash mirroring turns on once initial control wiring has finished setting
+  // up the default draft, so a clean page load with no hash doesn't stamp
+  // one for a recipe nobody touched. Every draft change after that rewrites
+  // the URL to match (see syncRecipeToHash).
+  hashSyncArmed: false,
+  // True from a legacy-format (#r=) bookmark restore until the user's next
+  // edit, which is when the legacy notice gets dismissed.
+  legacyNoticeShown: false,
 };
 
 function seqOf(name) {
@@ -1749,7 +1757,6 @@ if (window.matchMedia) {
 const tabs = { audit: document.getElementById('tabAudit'), calibrate: document.getElementById('tabCalibrate'), process: document.getElementById('tabProcess') };
 const panels = { audit: document.getElementById('panelAudit'), calibrate: document.getElementById('panelCalibrate'), process: document.getElementById('panelProcess') };
 function setMode(mode) {
-  if (mode === 'process' && !state.savedRecipe) return;
   state.mode = mode;
   for (const k of Object.keys(tabs)) {
     tabs[k].classList.toggle('active', k === mode);
@@ -1859,7 +1866,7 @@ function updateCounts() {
   countBadge.textContent = state.files.length + (state.files.length === 1 ? ' file' : ' files');
   clearFilesBtn.disabled = state.files.length === 0;
   document.getElementById('runAuditBtn').disabled = state.files.length === 0;
-  document.getElementById('runBatchBtn').disabled = state.files.length === 0 || !state.savedRecipe;
+  document.getElementById('runBatchBtn').disabled = state.files.length === 0;
 }
 
 async function addFiles(fileList) {
@@ -2314,8 +2321,27 @@ state.draft = { orient: ORIENT_IDENTITY };
 let previewToken = 0;
 const scheduleRecalc = debounce(() => recalcCalibratePreview(), 120);
 const recipeJsonView = document.getElementById('recipeJsonView');
+const processRecipeView = document.getElementById('processRecipeView');
+// The draft is the recipe: mirror it into the URL hash live so a bookmark
+// (or the Copy bookmark link button) always captures exactly what's on
+// screen. Guarded by hashSyncArmed so the flurry of sync() calls that wire
+// up the controls on page load — before the user has touched anything —
+// don't stamp a hash onto a clean load.
+function syncRecipeToHash() {
+  if (!state.hashSyncArmed) return;
+  history.replaceState(null, '', recipeToHash(state.draft));
+  // A legacy-recipe notice from a bookmark restore stays up only until the
+  // draft actually changes underneath it.
+  if (state.legacyNoticeShown) {
+    document.getElementById('legacyRecipeNotice').style.display = 'none';
+    state.legacyNoticeShown = false;
+  }
+}
 function updateRecipeJsonView() {
-  recipeJsonView.textContent = JSON.stringify(canonicalRecipe(state.draft), null, 2);
+  const json = JSON.stringify(canonicalRecipe(state.draft), null, 2);
+  recipeJsonView.textContent = json;
+  processRecipeView.textContent = json;
+  syncRecipeToHash();
 }
 
 function setSlotPresence(key, enabledCheckboxId, fieldsWrapId, defaultValue) {
@@ -2438,6 +2464,9 @@ setSlotPresence('manifest', 'manifestEnabled', null, () => true);
 document.getElementById('orientReset').addEventListener('click', () => { state.draft.orient = ORIENT_IDENTITY; scheduleRecalc(); updateRecipeJsonView(); });
 
 updateRecipeJsonView();
+// Control wiring above is done and the default draft is in place — from
+// here on, every draft change should be reflected in the URL hash.
+state.hashSyncArmed = true;
 
 // ── Recipe -> Calibrate: make the draft and every control match a recipe ──
 // Used by the bookmark-restore path so a restored recipe is editable in
@@ -2684,45 +2713,27 @@ function renderLoupe(preCanvas, postCanvas, worstBlock) {
   return { beforeCanvas, afterCanvas };
 }
 
-// ── Save Recipe: also the recipe's bookmark. replaceState keeps the
-// address bar — and so any bookmark of it — in sync with the saved recipe
-// without piling up a history entry per save. Shared with the page-load
-// restore path below so "just saved" and "just opened a bookmark" apply a
-// recipe identically. ──
-function applySavedRecipe(recipe) {
-  state.savedRecipe = recipe;
-  document.getElementById('processRecipeView').textContent = JSON.stringify(recipe, null, 2);
-  tabs.process.disabled = false;
-  updateCounts();
-  // Saving fresh from Calibrate is always the modern format; only the
-  // hash-restore path (below) re-shows this for an actual legacy recipe.
-  // Without this reset, a stale "old format" notice from an earlier
-  // bookmark restore would keep showing after a normal save.
-  document.getElementById('legacyRecipeNotice').style.display = 'none';
-}
-document.getElementById('saveRecipeBtn').addEventListener('click', () => {
-  const recipe = canonicalRecipe(state.draft);
-  recipe.createdDate = new Date().toISOString().slice(0, 10);
-  applySavedRecipe(recipe);
-  history.replaceState(null, '', recipeToHash(recipe));
-  setMode('process');
-});
-
-const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
-copyRecipeLinkBtn.addEventListener('click', async () => {
+// ── Copy bookmark link: the URL already mirrors the live draft (see
+// syncRecipeToHash), so this just hands the current address to the
+// clipboard. Shared by the Calibrate and Process copies of the button. ──
+async function copyRecipeLink(btn) {
   const url = location.href;
   try {
     await navigator.clipboard.writeText(url);
-    const original = copyRecipeLinkBtn.textContent;
-    copyRecipeLinkBtn.textContent = '✓ Copied';
-    setTimeout(() => { copyRecipeLinkBtn.textContent = original; }, 1500);
+    const original = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
   } catch {
     // Clipboard access can be unavailable (permissions, older browser); the
     // link is already sitting in the address bar either way, so fall back
     // to just surfacing it directly rather than failing silently.
     window.prompt('Copy this link:', url);
   }
-});
+}
+const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
+copyRecipeLinkBtn.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtn));
+const copyRecipeLinkBtnCalibrate = document.getElementById('copyRecipeLinkBtnCalibrate');
+copyRecipeLinkBtnCalibrate.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtnCalibrate));
 
 // ═══════════════════════════════════════════════════════════════
 // Process mode — the batch run. Deterministic. Zip out, optional manifest.
@@ -2787,10 +2798,15 @@ async function inspectProcessResult(r) {
 }
 
 runBatchBtn.addEventListener('click', async () => {
-  if (!state.savedRecipe || !state.files.length) return;
+  if (!state.files.length) return;
   runBatchBtn.disabled = true;
   downloadZipBtn.disabled = true;
-  const recipe = state.savedRecipe;
+  // createdDate isn't part of the draft (there's nothing to "save" — see
+  // syncRecipeToHash) — it's stamped onto the recipe fresh at run time, so
+  // it always reads as the date this batch actually ran.
+  batchCtx.today = fmtDateUTC(Date.now());
+  const recipe = canonicalRecipe(state.draft);
+  recipe.createdDate = batchCtx.today;
   const results = [];
   const zipEntries = {};
   let totalBefore = 0, totalAfter = 0;
@@ -2798,7 +2814,6 @@ runBatchBtn.addEventListener('click', async () => {
   // zip" true. DOS zip timestamps can't represent years before 1980, so this is the
   // recipe's frozen date rather than the (invalid) Unix epoch.
   const zipMtime = new Date(recipe.createdDate + 'T00:00:00Z');
-  batchCtx.today = fmtDateUTC(Date.now());
   const usedNames = new Set();
 
   // ── the pool: BATCH_CONCURRENCY images in flight, each worker pulling the
@@ -2893,7 +2908,7 @@ downloadZipBtn.addEventListener('click', () => {
   const blob = new Blob([state.lastZip], { type: 'application/zip' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = state.lastZipName || `imagechef-${state.savedRecipe.createdDate}.zip`;
+  a.download = state.lastZipName || `imagechef-${fmtDateUTC(Date.now())}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
@@ -2908,10 +2923,10 @@ downloadZipBtn.addEventListener('click', () => {
   const result = recipeFromHash(location.hash);
   if (!result) return;
   const { recipe, legacy, notes } = result;
-  if (!recipe.createdDate) recipe.createdDate = new Date().toISOString().slice(0, 10);
-  applySavedRecipe(recipe);
-  // The bookmark lands on Process, but Calibrate must hold the same recipe
-  // so it can be adjusted and re-saved rather than rebuilt from defaults.
+  // The bookmark lands on Process, but Calibrate is where the recipe
+  // actually lives — loading it there fills every control (and, once hash
+  // sync is armed, immediately rewrites the URL into the current canonical
+  // form, which is desirable even for a legacy `#r=` link).
   loadRecipeIntoCalibrate(recipe);
   const legacyNotice = document.getElementById('legacyRecipeNotice');
   if (legacy) {
@@ -2920,6 +2935,7 @@ downloadZipBtn.addEventListener('click', () => {
       ? `${escHtml(intro)}<ul style="margin:4px 0 0 18px">${notes.map(n => `<li>${escHtml(n)}</li>`).join('')}</ul>`
       : escHtml(intro);
     legacyNotice.style.display = '';
+    state.legacyNoticeShown = true;
   } else {
     legacyNotice.style.display = 'none';
   }
