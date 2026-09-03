@@ -24,6 +24,9 @@ These exclusions are load-bearing. They are what makes the output trustable.
 | Redaction | Inherently per-image judgment. Belongs in a separate one-image-at-a-time tool. |
 | Per-image data manifest (CSV in) | Turns the tool into an interactive editor with a batch veneer. |
 | User-ordered operation list | Every real ordering sensitivity has a better resolution (see below). |
+| Percent resize | Relative to each image's own size; not a fixed recipe. Name a box instead. |
+| Total-batch byte budget | Divides a number by however many files showed up; not per-image. Cap per image. |
+| "Keep original" output format | Varies per image. A recipe names its format. |
 
 ## The recipe is a record, not a list
 
@@ -38,8 +41,28 @@ decode → orient → resize → sharpen → stamp → flatten → color → met
 ```
 
 Exactly one decode. Exactly one encode, at the end. Generational loss is impossible
-by construction, not by user discipline. `output` sits outside the pixel pipeline:
-it names the encoded result, and `manifest` describes it.
+by construction, not by user discipline.
+
+Three slots act on the *set* rather than on pixels and sit outside the pipeline:
+`dedup` decides which files are processed at all, `output` names each encoded
+result, and `manifest` describes the run. They are still functions of
+`(input set, recipe)` and nothing else.
+
+### The recipe lives in the URL
+
+There is no save button. Whatever Calibrate currently shows *is* the recipe, and
+it is mirrored into the page's URL fragment as it changes. A bookmark is a saved
+recipe; a copied link is a shared one; opening either restores every control.
+The rework's explicit "save, then process" step was a gate the user paid for
+and the tool did not need.
+
+### The default recipe
+
+An empty record is a valid recipe and a poor first impression. A fresh page
+starts from the email preset — fit inside 1600 px, JPEG under 800 KB on a white
+background, exact duplicates skipped — so the first Process run does something
+sensible. Every slot stays optional; a "Reset to email default" button returns
+to it.
 
 ### Dates of record
 
@@ -77,7 +100,8 @@ Every apparent ordering problem collapses into one of three shapes:
 | `color` | target profile (sRGB) | Convert, then tag or strip the profile per `metadata`. |
 | `metadata` | retain-list | Default strip-all; the user names what survives (e.g. copyright). |
 | `encode` | `{ format, constraints }` | Constraints below. |
-| `output` | file-name template + zip-name template | Same tokens as `stamp`, resolved per image; the encode format supplies the extension. Defaults `{name}` and `imagechef-{today}`. Not a pixel operation — it names the encoded result. |
+| `output` | file-name template + zip-name template | Same tokens as `stamp`, resolved per image; the encode format supplies the extension. Defaults `{name}` and `imagechef-{today}`. Set-level — it names the encoded result. |
+| `dedup` | `{ by: "name+size" \| "name" }` | Later files matching an earlier one are skipped, listed as "Duplicate of …" in the results, and never numbered by `{seq}`. Set-level; default on (`name+size`). |
 | `manifest` | boolean | Emit `manifest.json` in the zip: filenames, dimensions, bytes, hashes, the recipe itself, date. Provenance for free. |
 
 ## Encoding is constraint satisfaction, not a quality slider
@@ -127,8 +151,8 @@ an A/B flicker.
 | Mode | Recipe supplies | What happens |
 |---|---|---|
 | **Audit** | nothing (read-only) | Report table across the set: dimensions, format, color profile, metadata inventory, GPS/PII exposure. No pixels touched. |
-| **Calibrate** | operations, tuned live | One exemplar, full instruments, produces the recipe (including the perceptual target). |
-| **Process** | everything | The batch run. Deterministic. Zip out, optional manifest. |
+| **Calibrate** | operations, tuned live | One exemplar, full instruments. The recipe is whatever Calibrate shows, mirrored into the URL as it changes (including the perceptual target). |
+| **Process** | everything | The batch run over the current recipe, several images in flight. Deterministic: output never depends on which finished first. Zip out, optional manifest. |
 
 Audit and the manifest share one report generator: audit is the report *instead of*
 processing; the manifest is the same report *attached to* processing.
