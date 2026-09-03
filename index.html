@@ -116,6 +116,10 @@
   .file-row:hover { background: var(--hover); }
   .file-row .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-row .fsize { color: var(--text-dim); font-size: 0.72rem; }
+  .dup-badge {
+    flex-shrink: 0; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.4px;
+    color: var(--warning); background: rgba(255,152,0,0.14); border-radius: 3px; padding: 1px 5px;
+  }
   .file-row.exemplar { background: rgba(15,155,142,0.12); }
   .file-row.exemplar:hover { background: rgba(15,155,142,0.2); }
   .file-thumb {
@@ -174,6 +178,7 @@
   tbody tr.status-error { background: rgba(244,67,54,0.07); }
   tbody tr.status-unsatisfiable { background: rgba(255,152,0,0.08); }
   tbody tr.status-ok { background: rgba(76,175,80,0.04); }
+  tbody tr.status-duplicate { background: rgba(136,136,170,0.08); color: var(--text-dim); }
   td, th { padding: 5px 10px; vertical-align: middle; }
   s { color: var(--error); opacity: 0.7; }
   .delta-view { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -270,7 +275,7 @@
   <div class="mode-tabs" role="tablist" aria-label="Mode">
     <button class="mode-tab active" id="tabAudit" role="tab">Audit</button>
     <button class="mode-tab" id="tabCalibrate" role="tab">Calibrate</button>
-    <button class="mode-tab" id="tabProcess" role="tab" disabled>Process</button>
+    <button class="mode-tab" id="tabProcess" role="tab">Process</button>
   </div>
   <select class="theme-select" id="themeSelect" style="margin-left:auto" aria-label="Color theme" title="Color theme">
     <option value="system">🖥️ System</option>
@@ -349,7 +354,7 @@
         <div class="slot-body">
           <pre class="recipe-json" id="recipeJsonView"></pre>
           <div class="btn-row" style="padding:0">
-            <button class="btn-primary" id="saveRecipeBtn">💾 Save Recipe → enables Process</button>
+            <button class="btn-secondary" id="copyRecipeLinkBtnCalibrate">🔗 Copy bookmark link</button>
           </div>
         </div>
       </div>
@@ -361,8 +366,9 @@
         <div class="slot-head"><span class="slot-name">Batch run</span></div>
         <div class="slot-body">
           <pre class="recipe-json" id="processRecipeView"></pre>
-          <div class="notice">This recipe is saved in the page URL — bookmark it (or copy the link below) to come
-            straight back here with the recipe already loaded: drop images, Run Batch, review, download.</div>
+          <div class="notice">This is the recipe you're building in Calibrate — it's mirrored into the page URL
+            as you edit it, so bookmarking (or copying the link below) brings you straight back here with the
+            recipe already loaded: drop images, Run Batch, review, download.</div>
           <div class="notice warn" id="legacyRecipeNotice" style="display:none"></div>
           <div class="btn-row" style="padding:0">
             <button class="btn-primary" id="runBatchBtn">🍳 Run Batch</button>
@@ -476,7 +482,7 @@ function basenameNoExt(name) { return name.replace(/\.[^./\\]+$/, ''); }
 // and the engine itself never iterates recipe keys — every slot is read by
 // name — so processing is order-insensitive by construction, not by
 // discipline.
-const SLOT_KEYS = ['orient', 'resize', 'sharpen', 'stamp', 'flatten', 'color', 'metadata', 'encode', 'output', 'manifest'];
+const SLOT_KEYS = ['orient', 'resize', 'sharpen', 'stamp', 'flatten', 'color', 'metadata', 'encode', 'output', 'dedup', 'manifest'];
 
 function canonicalRecipe(r) {
   const out = {};
@@ -486,6 +492,20 @@ function canonicalRecipe(r) {
 }
 
 function recipeIdentity(r) { return JSON.stringify(canonicalRecipe(r)); }
+
+// The default recipe a fresh page starts from: the pre-rework build's
+// one-click "Email preset" — fit inside 2048 px, JPEG under 100 KB on a
+// white background, exact duplicates skipped — chosen as a sensible
+// demonstration recipe. Every slot stays optional; nothing here is load-
+// bearing for the engine. `orient: 0` is ORIENT_IDENTITY, kept as the
+// literal so this block stays self-contained.
+const DEFAULT_RECIPE = Object.freeze({
+  orient: 0,
+  resize: { intent: 'fit', dimensions: { width: 2048, height: 2048 } },
+  flatten: { color: '#ffffff' },
+  encode: { format: 'jpeg', maxBytes: 100000 },
+  dedup: { by: 'name+size' },
+});
 
 // ── Templates: one token vocabulary for the stamp and the output name ─────
 // tokens: { name, seq, hash, date, today, width, height } per image, plus
@@ -534,6 +554,34 @@ function uniqueName(base, ext, used) {
   for (let i = 2; used.has(candidate); i++) candidate = `${base}-${i}.${ext}`;
   used.add(candidate);
   return candidate;
+}
+
+// ── Dedup: partition a file list into what gets processed and what's a
+// later duplicate ─────────────────────────────────────────────────────────
+// `items` is `{ name, size }` per file, in arrival (batch) order. The
+// first file under a given key is kept; every later file with the same
+// key is skipped, and points (`of`) at the kept index it duplicates —
+// never dropped from the record, just excluded from processing. Both
+// `keep` and `skip` come out ascending/order-preserving, so the caller
+// never has to re-sort to recover "what happened in what order". An
+// unrecognized `by` behaves as 'name+size', the stricter of the two —
+// the same fallback canonicalRecipe would leave in place if a hand-edited
+// or legacy-migrated recipe carried a stray value.
+function partitionDuplicates(items, by) {
+  const mode = by === 'name' ? 'name' : 'name+size';
+  const seen = new Map();
+  const keep = [];
+  const skip = [];
+  items.forEach((item, i) => {
+    const key = mode === 'name' ? item.name : item.name + '::' + item.size;
+    if (seen.has(key)) {
+      skip.push({ index: i, of: seen.get(key) });
+    } else {
+      seen.set(key, i);
+      keep.push(i);
+    }
+  });
+  return { keep, skip };
 }
 
 function fmtDateUTC(ms) { return new Date(ms).toISOString().slice(0, 10); }
@@ -649,6 +697,8 @@ function orientStateIndexFromMatrix(m) {
 //                          anymore — dropped
 //   grayscale -> (none)    no color/tone slot exists in the fixed
 //                          pipeline — dropped
+//   dedup     -> dedup     exact — the old op's `by` ('name+size' or
+//                          'name') carries straight across
 //
 // A disabled step (enabled: false) is skipped, same as it was live. Every
 // drop is reported in `notes` — never silent — so the UI can tell the
@@ -692,9 +742,13 @@ function migrateLegacyRecipe(steps, extras) {
       case 'resize': {
         if (config.mode === 'fit' || config.mode === 'exact') {
           recipe.resize = { intent: 'fit', dimensions: { width: config.w || 1920, height: config.h || 1080 } };
+          // Old "fit" enlarged only with its "Allow upscaling" box ticked;
+          // old "exact" always scaled to the box.
+          if (config.mode === 'exact' || config.allowUpscale) recipe.resize.upscale = true;
         } else if (config.mode === 'longest') {
           const side = config.longest || 1600;
           recipe.resize = { intent: 'fit', dimensions: { width: side, height: side } };
+          if (config.allowUpscale) recipe.resize.upscale = true;
         } else if (config.mode === 'percent') {
           notes.push('Resize: "percent" mode scaled relative to each image’s own size and has no fixed-recipe equivalent — dropped. Set an explicit size in Calibrate.');
         } else {
@@ -728,6 +782,9 @@ function migrateLegacyRecipe(steps, extras) {
         break;
       case 'grayscale':
         notes.push('Grayscale: color/tone operations were dropped from the fixed pipeline — no equivalent slot exists.');
+        break;
+      case 'dedup':
+        recipe.dedup = { by: config.by === 'name' ? 'name' : 'name+size' };
         break;
       default:
         notes.push(`Unrecognized step "${step.op}", skipped.`);
@@ -1077,6 +1134,18 @@ function injectJpegMinimalExif(bytes, fields) {
   return out;
 }
 
+// ── Resize: the scale `fit` applies ──────────────────────────────────────
+// `fit` places the image inside the box, aspect preserved, and never
+// enlarges a smaller source unless the slot says `upscale: true`. The
+// pre-rework build made enlargement an explicit, visible choice ("Allow
+// upscaling"), and a default recipe that fits inside 2048 px must not blow
+// a 640 px photo up to 2048. `cover` and `exact-pad` are unaffected: they
+// promise a box size and must scale to deliver it.
+function fitScale(srcW, srcH, boxW, boxH, upscale) {
+  const s = Math.min(boxW / srcW, boxH / srcH);
+  return upscale ? s : Math.min(s, 1);
+}
+
 // ===== ENGINE-LIB-END =====
 
 // ═══════════════════════════════════════════════════════════════
@@ -1340,7 +1409,8 @@ function applyResize(canvas, resizeCfg) {
     return out;
   }
   // 'fit'
-  const scale = Math.min(W / srcW, H / srcH);
+  const scale = fitScale(srcW, srcH, W, H, !!resizeCfg.upscale);
+  if (scale === 1) return canvas; // already inside the box and not enlarging: untouched
   const dw = Math.max(1, Math.round(srcW * scale)), dh = Math.max(1, Math.round(srcH * scale));
   return resizeCanvasTo(canvas, dw, dh);
 }
@@ -1548,13 +1618,16 @@ function dateOfRecord(file, srcBytes, ext, today) {
   if (file && file.lastModified) return fmtDateUTC(file.lastModified);
   return today;
 }
-function buildTokens(file, srcBytes, ext, batchCtx, hash, canvas) {
+// `entry` is a state.files record ({ id, file, ext, ... }), not a bare
+// File — seq needs the id to place this exact import among the batch's
+// kept (non-duplicate) entries, since two entries can now share a name.
+function buildTokens(entry, srcBytes, ext, batchCtx, hash, canvas) {
   const today = batchCtx.today || fmtDateUTC(Date.now());
   return {
-    name: basenameNoExt(file.name),
-    seq: batchCtx.seqOf(file.name),
+    name: basenameNoExt(entry.file.name),
+    seq: batchCtx.seqOf(entry),
     hash,
-    date: dateOfRecord(file, srcBytes, ext, today),
+    date: dateOfRecord(entry.file, srcBytes, ext, today),
     today,
     width: canvas.width,
     height: canvas.height,
@@ -1562,15 +1635,15 @@ function buildTokens(file, srcBytes, ext, batchCtx, hash, canvas) {
 }
 
 // ── the fixed pipeline ──
-// batchCtx: { seqOf(name), today }. tokens.hash is filled in by the
+// batchCtx: { seqOf(entry), today }. tokens.hash is filled in by the
 // caller from the file's precomputed content hash.
 //
 // Split out from runPipeline so the Process-mode Inspector can reconstruct
 // the exact pre-encode canvas on demand (same file + same recipe = same
 // canvas, by the determinism commandment) without re-running encode.
-async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash) {
+async function buildPreEncodeCanvas(entry, srcBytes, ext, recipe, batchCtx, hash) {
   const decoded = await (async () => {
-    const bitmap = await createImageBitmap(file, { imageOrientation: 'none', colorSpaceConversion: 'default' });
+    const bitmap = await createImageBitmap(entry.file, { imageOrientation: 'none', colorSpaceConversion: 'default' });
     const c = newCanvas(bitmap.width, bitmap.height);
     c.getContext('2d').drawImage(bitmap, 0, 0);
     bitmap.close();
@@ -1595,10 +1668,10 @@ async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash)
 
   if (recipe.sharpen) canvas = applySharpen(canvas, recipe.sharpen);
 
-  const name = basenameNoExt(file.name);
+  const name = basenameNoExt(entry.file.name);
   // Stamp is rendered in output space, so the canvas here already has the
   // final dimensions {width}x{height} refer to.
-  const tokens = buildTokens(file, srcBytes, ext, batchCtx, hash, canvas);
+  const tokens = buildTokens(entry, srcBytes, ext, batchCtx, hash, canvas);
   if (recipe.stamp && recipe.stamp.template) canvas = applyStamp(canvas, recipe.stamp, tokens);
 
   const format = (recipe.encode && recipe.encode.format) || 'jpeg';
@@ -1612,8 +1685,8 @@ async function buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash)
   return { canvas, deltas, name, format, tokens };
 }
 
-async function runPipeline(file, srcBytes, ext, recipe, batchCtx, hash) {
-  const { canvas, deltas, format, tokens } = await buildPreEncodeCanvas(file, srcBytes, ext, recipe, batchCtx, hash);
+async function runPipeline(entry, srcBytes, ext, recipe, batchCtx, hash) {
+  const { canvas, deltas, format, tokens } = await buildPreEncodeCanvas(entry, srcBytes, ext, recipe, batchCtx, hash);
 
   const retainedValues = gatherRetainedValues(srcBytes, ext, recipe.metadata && recipe.metadata.retain);
   deltas.metadata = { available: gatherRetainedValues(srcBytes, ext, RETAINABLE_FIELDS), retained: retainedValues };
@@ -1693,21 +1766,52 @@ const state = {
   files: [],           // { id, file, ext, bytes(lazy), hash(lazy promise), dims(lazy) }
   mode: 'audit',
   exemplarId: null,
-  draft: {},           // working recipe while calibrating (canonical field names)
-  savedRecipe: null,   // frozen recipe (includes createdDate) once "Save Recipe" is clicked
+  draft: {},           // working recipe while calibrating (canonical field names) — this IS the recipe
   auditReport: null,
   processResults: null,
   lastZip: null,
   lastZipName: null,
+  // True after a bookmark restore whose recipe carries an encode.ssimTarget:
+  // the Calibrate preview then searches quality to *meet* that target on the
+  // exemplar (setting the slider to what it found) instead of overwriting the
+  // target with whatever the slider's current quality happens to achieve.
+  // Cleared the moment the user moves the quality slider themselves.
+  pinnedSsimTarget: false,
+  // Hash mirroring turns on once initial control wiring has finished setting
+  // up the default draft, so a clean page load with no hash doesn't stamp
+  // one for a recipe nobody touched. Every draft change after that rewrites
+  // the URL to match (see syncRecipeToHash).
+  hashSyncArmed: false,
+  // True from a legacy-format (#r=) bookmark restore until the user's next
+  // edit, which is when the legacy notice gets dismissed.
+  legacyNoticeShown: false,
 };
 
-function seqOf(name) {
-  const sorted = [...state.files].map(f => f.file.name).sort();
-  return sorted.indexOf(name) + 1;
+// 1-based position of `entry` among the entries that will actually be
+// processed — the file list minus whatever the current draft's Duplicates
+// slot would skip — sorted by file name with arrival order (position in
+// state.files) as the tiebreak. A skipped duplicate is never numbered, and
+// this never depends on when anything finishes, only on the file list and
+// the recipe: same inputs + same recipe always number the same way.
+function seqOf(entry) {
+  const dedup = state.draft.dedup;
+  const items = state.files.map(f => ({ name: f.file.name, size: f.file.size }));
+  const partition = dedup ? partitionDuplicates(items, dedup.by) : { keep: items.map((_, i) => i), skip: [] };
+  const kept = partition.keep.map((fileIdx, arrival) => ({ id: state.files[fileIdx].id, name: state.files[fileIdx].file.name, arrival }));
+  kept.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.arrival - b.arrival));
+  return kept.findIndex(k => k.id === entry.id) + 1;
 }
 // `today` is set when a batch run starts and cleared after, so every image
 // in one run sees the same run date even across a midnight boundary.
 const batchCtx = { seqOf, today: null };
+// How many images Process keeps in flight at once. Decode, encode and the
+// per-image SSIM search are async browser work, so a few in flight keeps
+// the encoder busy while another image is still decoding; the pixel-level
+// resample is main-thread and bounds the gain. Three is what the
+// pre-rework build used and it measured well. Output is unaffected by
+// this number: names, results and zip entries are assigned in file order
+// after the pool drains (see the batch run), never in completion order.
+const BATCH_CONCURRENCY = 3;
 
 // ── Theme ──
 const themeSelect = document.getElementById('themeSelect');
@@ -1735,7 +1839,6 @@ if (window.matchMedia) {
 const tabs = { audit: document.getElementById('tabAudit'), calibrate: document.getElementById('tabCalibrate'), process: document.getElementById('tabProcess') };
 const panels = { audit: document.getElementById('panelAudit'), calibrate: document.getElementById('panelCalibrate'), process: document.getElementById('panelProcess') };
 function setMode(mode) {
-  if (mode === 'process' && !state.savedRecipe) return;
   state.mode = mode;
   for (const k of Object.keys(tabs)) {
     tabs[k].classList.toggle('active', k === mode);
@@ -1794,8 +1897,25 @@ async function inspectSourceFile(entry) {
   });
 }
 
+// Maps entry.id -> the name of the earlier file it duplicates, per the
+// current draft's Duplicates slot (absent = nothing is a duplicate). Pure
+// UI-side read of partitionDuplicates — recomputed on every render so the
+// file list always reflects whatever the Calibrate control is set to right
+// now, not whatever it was when a file was added.
+function computeDuplicateSkipMap() {
+  const dedup = state.draft.dedup;
+  const map = new Map();
+  if (!dedup) return map;
+  const items = state.files.map(f => ({ name: f.file.name, size: f.file.size }));
+  const { skip } = partitionDuplicates(items, dedup.by);
+  for (const s of skip) map.set(state.files[s.index].id, state.files[s.of].file.name);
+  return map;
+}
+
 function renderFileList() {
   fileListEl.innerHTML = '';
+  const dupMap = computeDuplicateSkipMap();
+  const dedupByLabel = state.draft.dedup && state.draft.dedup.by === 'name' ? 'by name' : 'by name+size';
   for (const entry of state.files) {
     const row = document.createElement('div');
     row.className = 'file-row' + (entry.id === state.exemplarId ? ' exemplar' : '');
@@ -1837,7 +1957,15 @@ function renderFileList() {
       renderExemplarSelect();
       updateCounts();
     });
-    row.appendChild(thumb); row.appendChild(fname); row.appendChild(fsize); row.appendChild(rm);
+    row.appendChild(thumb); row.appendChild(fname); row.appendChild(fsize);
+    if (dupMap.has(entry.id)) {
+      const badge = document.createElement('span');
+      badge.className = 'dup-badge';
+      badge.textContent = 'duplicate';
+      badge.title = `Duplicate of ${dupMap.get(entry.id)} (${dedupByLabel})`;
+      row.appendChild(badge);
+    }
+    row.appendChild(rm);
     fileListEl.appendChild(row);
   }
 }
@@ -1845,7 +1973,7 @@ function updateCounts() {
   countBadge.textContent = state.files.length + (state.files.length === 1 ? ' file' : ' files');
   clearFilesBtn.disabled = state.files.length === 0;
   document.getElementById('runAuditBtn').disabled = state.files.length === 0;
-  document.getElementById('runBatchBtn').disabled = state.files.length === 0 || !state.savedRecipe;
+  document.getElementById('runBatchBtn').disabled = state.files.length === 0;
 }
 
 async function addFiles(fileList) {
@@ -1875,8 +2003,11 @@ async function addFiles(fileList) {
 function chooseMimeFromExt(ext) {
   return { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp' }[ext] || 'application/octet-stream';
 }
+// Every dropped file is kept and listed, even a byte-for-byte repeat — it
+// gets its own id, its own row, and (per the recipe's Duplicates slot) is
+// either processed normally or shown as a Duplicate at Process time. Never
+// silently dropped at import.
 function addOneFile(f) {
-  if (state.files.find(e => e.file.name === f.name && e.file.size === f.size)) return;
   const entry = { id: uid(), file: f, ext: extOf(f.name) };
   entry.bytesPromise = f.arrayBuffer().then(b => new Uint8Array(b));
   entry.hashPromise = entry.bytesPromise.then(hashHex);
@@ -2129,9 +2260,22 @@ function debounce(fn, ms) {
 const exemplarSelect = document.getElementById('exemplarSelect');
 function renderExemplarSelect() {
   exemplarSelect.innerHTML = '';
+  // Two entries can share a name now that import never silently drops a
+  // duplicate — disambiguate any repeated name with its size and which
+  // occurrence it is, so the dropdown never shows two identical labels.
+  const nameCounts = new Map();
+  for (const entry of state.files) nameCounts.set(entry.file.name, (nameCounts.get(entry.file.name) || 0) + 1);
+  const occurrenceSoFar = new Map();
   for (const entry of state.files) {
     const o = document.createElement('option');
-    o.value = entry.id; o.textContent = entry.file.name;
+    o.value = entry.id;
+    if (nameCounts.get(entry.file.name) > 1) {
+      const occurrence = (occurrenceSoFar.get(entry.file.name) || 0) + 1;
+      occurrenceSoFar.set(entry.file.name, occurrence);
+      o.textContent = `${entry.file.name} (${fmtBytes(entry.file.size)}, #${occurrence})`;
+    } else {
+      o.textContent = entry.file.name;
+    }
     if (entry.id === state.exemplarId) o.selected = true;
     exemplarSelect.appendChild(o);
   }
@@ -2163,20 +2307,21 @@ slotSections.innerHTML = `
   <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Resize</span><span class="slot-tag">the only honest thumbnail</span></div>
     <div class="slot-body">
-      <label class="checkbox-row"><input type="checkbox" id="resizeEnabled"> Include this slot</label>
+      <label class="checkbox-row"><input type="checkbox" id="resizeEnabled" checked> Include this slot</label>
       <div id="resizeFields" style="display:flex;flex-direction:column;gap:10px">
         <div class="field-row">
           <label>Intent</label>
           <select id="resizeIntent">
-            <option value="fit">fit (aspect preserved, inside box)</option>
+            <option value="fit" selected>fit (aspect preserved, inside box)</option>
             <option value="cover">cover (fill box, center-trimmed)</option>
             <option value="exact-pad">exact-pad (exact size, padded)</option>
           </select>
         </div>
         <div class="field-row">
-          <label>Width</label><input type="number" id="resizeWidth" min="1" max="20000" value="1920"><span class="unit">px</span>
-          <label style="min-width:20px">H</label><input type="number" id="resizeHeight" min="1" max="20000" value="1080"><span class="unit">px</span>
+          <label>Width</label><input type="number" id="resizeWidth" min="1" max="20000" value="2048"><span class="unit">px</span>
+          <label style="min-width:20px">H</label><input type="number" id="resizeHeight" min="1" max="20000" value="2048"><span class="unit">px</span>
         </div>
+        <label class="checkbox-row"><input type="checkbox" id="resizeUpscale"> Enlarge smaller images to fill the box (fit only — never enlarged otherwise)</label>
       </div>
       <div class="delta-view" id="resizeDeltaView"></div>
     </div>
@@ -2222,7 +2367,7 @@ slotSections.innerHTML = `
   <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Flatten</span><span class="slot-tag">explicit alpha handling</span></div>
     <div class="slot-body">
-      <label class="checkbox-row"><input type="checkbox" id="flattenEnabled"> Include this slot</label>
+      <label class="checkbox-row"><input type="checkbox" id="flattenEnabled" checked> Include this slot</label>
       <div class="field-row" id="flattenFields"><label>Background</label><input type="color" id="flattenColor" value="#ffffff"></div>
       <div class="notice">If omitted and the output format can't hold transparency (JPEG), white is used as a necessity — but selecting JPEG below auto-includes this slot so that choice stays explicit in the saved recipe.</div>
     </div>
@@ -2266,7 +2411,7 @@ slotSections.innerHTML = `
         <span class="unit" id="encodeQualityLabel">85</span>
       </div>
       <div class="field-row">
-        <label>Max bytes</label><input type="number" id="encodeMaxBytes" min="0" placeholder="none"><span class="unit">bytes (optional)</span>
+        <label>Max bytes</label><input type="number" id="encodeMaxBytes" min="0" placeholder="none" value="100000"><span class="unit">bytes (optional)</span>
       </div>
       <div class="notice">Drag Quality until the achieved SSIM and worst-region loupe look right. What gets saved is the <strong>achieved SSIM</strong>, not this number — Process re-derives quality per image to hit that same score.</div>
       <div class="stat-grid" id="encodeStats"></div>
@@ -2288,6 +2433,23 @@ slotSections.innerHTML = `
   </div>
 
   <div class="slot-section">
+    <div class="slot-head"><span class="slot-name">Duplicates</span><span class="slot-tag">skip repeats, never silently</span></div>
+    <div class="slot-body">
+      <label class="checkbox-row"><input type="checkbox" id="dedupEnabled" checked> Include this slot</label>
+      <div id="dedupFields" style="display:flex;flex-direction:column;gap:10px">
+        <div class="field-row">
+          <label>Match by</label>
+          <select id="dedupBy">
+            <option value="name+size">Name + size</option>
+            <option value="name">Name only</option>
+          </select>
+        </div>
+        <div class="notice">Later duplicates are skipped during Process and listed as Duplicate — never silently dropped.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="slot-section">
     <div class="slot-head"><span class="slot-name">Manifest</span></div>
     <div class="slot-body">
       <label class="checkbox-row"><input type="checkbox" id="manifestEnabled"> Emit manifest.json in the output zip</label>
@@ -2300,8 +2462,27 @@ state.draft = { orient: ORIENT_IDENTITY };
 let previewToken = 0;
 const scheduleRecalc = debounce(() => recalcCalibratePreview(), 120);
 const recipeJsonView = document.getElementById('recipeJsonView');
+const processRecipeView = document.getElementById('processRecipeView');
+// The draft is the recipe: mirror it into the URL hash live so a bookmark
+// (or the Copy bookmark link button) always captures exactly what's on
+// screen. Guarded by hashSyncArmed so the flurry of sync() calls that wire
+// up the controls on page load — before the user has touched anything —
+// don't stamp a hash onto a clean load.
+function syncRecipeToHash() {
+  if (!state.hashSyncArmed) return;
+  history.replaceState(null, '', recipeToHash(state.draft));
+  // A legacy-recipe notice from a bookmark restore stays up only until the
+  // draft actually changes underneath it.
+  if (state.legacyNoticeShown) {
+    document.getElementById('legacyRecipeNotice').style.display = 'none';
+    state.legacyNoticeShown = false;
+  }
+}
 function updateRecipeJsonView() {
-  recipeJsonView.textContent = JSON.stringify(canonicalRecipe(state.draft), null, 2);
+  const json = JSON.stringify(canonicalRecipe(state.draft), null, 2);
+  recipeJsonView.textContent = json;
+  processRecipeView.textContent = json;
+  syncRecipeToHash();
 }
 
 function setSlotPresence(key, enabledCheckboxId, fieldsWrapId, defaultValue) {
@@ -2317,11 +2498,20 @@ function setSlotPresence(key, enabledCheckboxId, fieldsWrapId, defaultValue) {
   sync();
 }
 
-setSlotPresence('resize', 'resizeEnabled', 'resizeFields', () => ({ intent: document.getElementById('resizeIntent').value, dimensions: { width: parseInt(document.getElementById('resizeWidth').value) || 1920, height: parseInt(document.getElementById('resizeHeight').value) || 1080 } }));
-document.getElementById('resizeIntent').addEventListener('change', () => { if (state.draft.resize) { state.draft.resize.intent = document.getElementById('resizeIntent').value; scheduleRecalc(); updateRecipeJsonView(); } });
-['resizeWidth', 'resizeHeight'].forEach(id => document.getElementById(id).addEventListener('change', () => {
+// `upscale` is written only when set, so a recipe that never asked to
+// enlarge stays minimal (and identical to one saved before the flag existed).
+function readResizeFields() {
+  const r = {
+    intent: document.getElementById('resizeIntent').value,
+    dimensions: { width: parseInt(document.getElementById('resizeWidth').value) || 1, height: parseInt(document.getElementById('resizeHeight').value) || 1 },
+  };
+  if (document.getElementById('resizeUpscale').checked) r.upscale = true;
+  return r;
+}
+setSlotPresence('resize', 'resizeEnabled', 'resizeFields', readResizeFields);
+['resizeIntent', 'resizeWidth', 'resizeHeight', 'resizeUpscale'].forEach(id => document.getElementById(id).addEventListener('change', () => {
   if (!state.draft.resize) return;
-  state.draft.resize.dimensions = { width: parseInt(document.getElementById('resizeWidth').value) || 1, height: parseInt(document.getElementById('resizeHeight').value) || 1 };
+  state.draft.resize = readResizeFields();
   scheduleRecalc(); updateRecipeJsonView();
 }));
 
@@ -2407,9 +2597,17 @@ encodeMaxBytesInput.addEventListener('change', () => {
   scheduleRecalc(); updateRecipeJsonView();
 });
 document.getElementById('encodeQualityPreview').addEventListener('input', debounce(() => {
+  state.pinnedSsimTarget = false;
   document.getElementById('encodeQualityLabel').textContent = document.getElementById('encodeQualityPreview').value;
   scheduleRecalc();
 }, 150));
+
+setSlotPresence('dedup', 'dedupEnabled', 'dedupFields', () => ({ by: document.getElementById('dedupBy').value }));
+document.getElementById('dedupEnabled').addEventListener('change', renderFileList);
+document.getElementById('dedupBy').addEventListener('change', () => {
+  if (state.draft.dedup) { state.draft.dedup = { by: document.getElementById('dedupBy').value }; scheduleRecalc(); updateRecipeJsonView(); }
+  renderFileList();
+});
 
 setSlotPresence('manifest', 'manifestEnabled', null, () => true);
 
@@ -2423,6 +2621,77 @@ setSlotPresence('manifest', 'manifestEnabled', null, () => true);
 document.getElementById('orientReset').addEventListener('click', () => { state.draft.orient = ORIENT_IDENTITY; scheduleRecalc(); updateRecipeJsonView(); });
 
 updateRecipeJsonView();
+// A fresh page starts from the email preset (see DEFAULT_RECIPE), not an
+// empty recipe — loadRecipeIntoCalibrate sets every control to match. This
+// runs before hashSyncArmed flips on, so a clean load still leaves the URL
+// untouched even though the draft itself is no longer empty.
+loadRecipeIntoCalibrate(DEFAULT_RECIPE);
+// Control wiring above is done and the default draft is in place — from
+// here on, every draft change should be reflected in the URL hash.
+state.hashSyncArmed = true;
+
+// ── Recipe -> Calibrate: make the draft and every control match a recipe ──
+// Used by the bookmark-restore path so a restored recipe is editable in
+// Calibrate exactly as it was saved, not just displayed in Process. Fields
+// are set directly rather than by dispatching 'change' events, because the
+// encode-format handler has a side effect (auto-enabling flatten for JPEG)
+// that would add a slot the recipe didn't have.
+function setChecked(id, on) { document.getElementById(id).checked = !!on; }
+function setValue(id, v) { document.getElementById(id).value = v; }
+function loadRecipeIntoCalibrate(recipe) {
+  const r = canonicalRecipe(recipe);
+  const draft = JSON.parse(JSON.stringify(r));
+  delete draft.createdDate;              // Save Recipe stamps a fresh one
+  if (draft.orient === undefined) draft.orient = ORIENT_IDENTITY;
+  if (!draft.encode || !draft.encode.format) draft.encode = { ...draft.encode, format: 'jpeg' };
+  state.draft = draft;
+
+  const slotFields = { resize: 'resizeFields', stamp: 'stampFields', output: 'outputFields', flatten: 'flattenFields', dedup: 'dedupFields' };
+  for (const [key, id] of Object.entries({ resize: 'resizeEnabled', sharpen: 'sharpenEnabled', stamp: 'stampEnabled', output: 'outputEnabled', flatten: 'flattenEnabled', color: 'colorEnabled', dedup: 'dedupEnabled', manifest: 'manifestEnabled' })) {
+    setChecked(id, draft[key] !== undefined);
+    if (slotFields[key]) document.getElementById(slotFields[key]).style.display = draft[key] !== undefined ? '' : 'none';
+  }
+  if (draft.resize) {
+    setValue('resizeIntent', draft.resize.intent || 'fit');
+    setValue('resizeWidth', (draft.resize.dimensions && draft.resize.dimensions.width) || 1920);
+    setValue('resizeHeight', (draft.resize.dimensions && draft.resize.dimensions.height) || 1080);
+  }
+  setChecked('resizeUpscale', !!(draft.resize && draft.resize.upscale));
+  if (draft.sharpen !== undefined) {
+    setValue('sharpenAmount', draft.sharpen);
+    document.getElementById('sharpenAmountLabel').textContent = Number(draft.sharpen).toFixed(2);
+  }
+  if (draft.stamp) {
+    setValue('stampTemplate', draft.stamp.template || '');
+    setValue('stampPosition', draft.stamp.position || 'bottom-right');
+    setValue('stampFontSize', draft.stamp.fontSize || 24);
+    setValue('stampColor', draft.stamp.color || '#ffffff');
+    const op = draft.stamp.opacity == null ? 0.85 : draft.stamp.opacity;
+    setValue('stampOpacity', op);
+    document.getElementById('stampOpacityLabel').textContent = String(op);
+  }
+  if (draft.output) {
+    setValue('outputName', draft.output.name || DEFAULT_OUTPUT_NAME);
+    setValue('outputZip', draft.output.zip || DEFAULT_ZIP_NAME);
+  }
+  if (draft.flatten) setValue('flattenColor', draft.flatten.color || '#ffffff');
+  if (draft.dedup) setValue('dedupBy', draft.dedup.by === 'name' ? 'name' : 'name+size');
+
+  const retain = (draft.metadata && draft.metadata.retain) || [];
+  setChecked('metaCopyright', retain.includes('copyright'));
+  setChecked('metaArtist', retain.includes('artist'));
+  setChecked('metaDescription', retain.includes('description'));
+  setChecked('metaDatetime', retain.includes('datetime'));
+
+  setValue('encodeFormat', draft.encode.format);
+  encodeQualityRow.style.display = draft.encode.format === 'png' ? 'none' : '';
+  setValue('encodeMaxBytes', draft.encode.maxBytes != null ? draft.encode.maxBytes : '');
+  state.pinnedSsimTarget = draft.encode.ssimTarget != null && draft.encode.format !== 'png';
+
+  renderFileList();
+  updateRecipeJsonView();
+  scheduleRecalc();
+}
 
 // ── live preview / delta views ──
 async function recalcCalibratePreview() {
@@ -2462,7 +2731,7 @@ async function recalcCalibratePreview() {
   if (state.draft.sharpen) canvas = applySharpen(canvas, state.draft.sharpen);
   if (myToken !== previewToken) return;
 
-  const previewTokens = buildTokens(entry.file, srcBytes, entry.ext, batchCtx, await entry.hashPromise, canvas);
+  const previewTokens = buildTokens(entry, srcBytes, entry.ext, batchCtx, await entry.hashPromise, canvas);
   if (myToken !== previewToken) return;
   if (state.draft.stamp && state.draft.stamp.template) {
     canvas = applyStamp(canvas, state.draft.stamp, previewTokens);
@@ -2495,21 +2764,38 @@ async function recalcCalibratePreview() {
   }
 
   // ── encode delta view (this is the "you are the search" calibration step) ──
-  const q = parseInt(document.getElementById('encodeQualityPreview').value) / 100;
   const mime = FORMAT_MIME[format];
   const preData = getRGBA(canvas).data;
   const W = canvas.width, H = canvas.height;
-  const blob = await canvasToBlobAsync(canvas, mime, format === 'png' ? 1 : q);
-  if (myToken !== previewToken) return;
-  let achievedSsim = 1, decodedCanvas = null, stats = null;
-  if (format !== 'png') {
+  let blob, achievedSsim = 1, decodedCanvas = null, stats = null;
+  const pinned = state.pinnedSsimTarget && format !== 'png' && state.draft.encode.ssimTarget != null;
+  if (pinned) {
+    // A restored recipe's target is the truth; find the quality that meets
+    // it on this exemplar (same search Process runs per image) and move the
+    // slider there, so the instruments show the bookmark's own calibration.
+    const solved = await solveEncode(canvas, format, { ssimTarget: state.draft.encode.ssimTarget, maxBytes: state.draft.encode.maxBytes });
+    if (myToken !== previewToken) return;
+    blob = solved.blob;
+    achievedSsim = solved.achieved.ssim;
+    stats = solved.achieved.stats;
     decodedCanvas = await decodeBlobToCanvas(blob);
     if (myToken !== previewToken) return;
-    stats = computeBlockStats(preData, getRGBA(decodedCanvas).data, W, H, 8);
-    achievedSsim = stats.meanSsim;
+    const qPct = Math.round((solved.achieved.quality || 0) * 100);
+    document.getElementById('encodeQualityPreview').value = qPct;
+    document.getElementById('encodeQualityLabel').textContent = String(qPct);
+  } else {
+    const q = parseInt(document.getElementById('encodeQualityPreview').value) / 100;
+    blob = await canvasToBlobAsync(canvas, mime, format === 'png' ? 1 : q);
+    if (myToken !== previewToken) return;
+    if (format !== 'png') {
+      decodedCanvas = await decodeBlobToCanvas(blob);
+      if (myToken !== previewToken) return;
+      stats = computeBlockStats(preData, getRGBA(decodedCanvas).data, W, H, 8);
+      achievedSsim = stats.meanSsim;
+    }
+    state.draft.encode = { ...state.draft.encode, ssimTarget: format === 'png' ? undefined : achievedSsim };
+    if (state.draft.encode.ssimTarget === undefined) delete state.draft.encode.ssimTarget;
   }
-  state.draft.encode = { ...state.draft.encode, ssimTarget: format === 'png' ? undefined : achievedSsim };
-  if (state.draft.encode.ssimTarget === undefined) delete state.draft.encode.ssimTarget;
 
   document.getElementById('encodeStats').innerHTML = `
     <div class="stat"><div class="k">Before</div><div class="v">${fmtBytes(srcBytes.length)}</div></div>
@@ -2592,45 +2878,27 @@ function renderLoupe(preCanvas, postCanvas, worstBlock) {
   return { beforeCanvas, afterCanvas };
 }
 
-// ── Save Recipe: also the recipe's bookmark. replaceState keeps the
-// address bar — and so any bookmark of it — in sync with the saved recipe
-// without piling up a history entry per save. Shared with the page-load
-// restore path below so "just saved" and "just opened a bookmark" apply a
-// recipe identically. ──
-function applySavedRecipe(recipe) {
-  state.savedRecipe = recipe;
-  document.getElementById('processRecipeView').textContent = JSON.stringify(recipe, null, 2);
-  tabs.process.disabled = false;
-  updateCounts();
-  // Saving fresh from Calibrate is always the modern format; only the
-  // hash-restore path (below) re-shows this for an actual legacy recipe.
-  // Without this reset, a stale "old format" notice from an earlier
-  // bookmark restore would keep showing after a normal save.
-  document.getElementById('legacyRecipeNotice').style.display = 'none';
-}
-document.getElementById('saveRecipeBtn').addEventListener('click', () => {
-  const recipe = canonicalRecipe(state.draft);
-  recipe.createdDate = new Date().toISOString().slice(0, 10);
-  applySavedRecipe(recipe);
-  history.replaceState(null, '', recipeToHash(recipe));
-  setMode('process');
-});
-
-const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
-copyRecipeLinkBtn.addEventListener('click', async () => {
+// ── Copy bookmark link: the URL already mirrors the live draft (see
+// syncRecipeToHash), so this just hands the current address to the
+// clipboard. Shared by the Calibrate and Process copies of the button. ──
+async function copyRecipeLink(btn) {
   const url = location.href;
   try {
     await navigator.clipboard.writeText(url);
-    const original = copyRecipeLinkBtn.textContent;
-    copyRecipeLinkBtn.textContent = '✓ Copied';
-    setTimeout(() => { copyRecipeLinkBtn.textContent = original; }, 1500);
+    const original = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
   } catch {
     // Clipboard access can be unavailable (permissions, older browser); the
     // link is already sitting in the address bar either way, so fall back
     // to just surfacing it directly rather than failing silently.
     window.prompt('Copy this link:', url);
   }
-});
+}
+const copyRecipeLinkBtn = document.getElementById('copyRecipeLinkBtn');
+copyRecipeLinkBtn.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtn));
+const copyRecipeLinkBtnCalibrate = document.getElementById('copyRecipeLinkBtnCalibrate');
+copyRecipeLinkBtnCalibrate.addEventListener('click', () => copyRecipeLink(copyRecipeLinkBtnCalibrate));
 
 // ═══════════════════════════════════════════════════════════════
 // Process mode — the batch run. Deterministic. Zip out, optional manifest.
@@ -2648,9 +2916,10 @@ function renderResultsTable(results) {
   processResultWrap.style.display = results.length ? '' : 'none';
   for (const r of results) {
     const tr = document.createElement('tr');
-    const statusClass = r.error ? 'status-error' : (r.unsatisfiable ? 'status-unsatisfiable' : 'status-ok');
+    const statusClass = r.duplicate ? 'status-duplicate' : (r.error ? 'status-error' : (r.unsatisfiable ? 'status-unsatisfiable' : 'status-ok'));
     tr.className = statusClass;
-    const statusText = r.error ? ('Error: ' + escHtml(r.error)) : (r.unsatisfiable ? escHtml(r.unsatisfiable) : 'OK');
+    const statusText = r.duplicate ? ('Duplicate of ' + escHtml(r.duplicateOfName))
+      : (r.error ? ('Error: ' + escHtml(r.error)) : (r.unsatisfiable ? escHtml(r.unsatisfiable) : 'OK'));
     const outNote = r.outName && r.outName !== r.name ? `<div style="font-size:0.78em;opacity:0.7">→ ${escHtml(r.outName)}</div>` : '';
     tr.innerHTML = `
       <td>${escHtml(r.name)}${outNote}</td>
@@ -2681,7 +2950,7 @@ function renderResultsTable(results) {
 // a normalized heatmap on the final pane, from the block stats already
 // computed and retained for this result during the batch run.
 async function inspectProcessResult(r) {
-  const entry = state.files.find(f => f.file.name === r.name);
+  const entry = state.files.find(f => f.id === r.id);
   if (!entry) return;
   const originalCanvas = await ensureSourceCanvas(entry);
   const afterCanvas = await decodeBlobToCanvas(new Blob([r.outBytes], { type: FORMAT_MIME[r.format] || 'image/jpeg' }));
@@ -2695,10 +2964,15 @@ async function inspectProcessResult(r) {
 }
 
 runBatchBtn.addEventListener('click', async () => {
-  if (!state.savedRecipe || !state.files.length) return;
+  if (!state.files.length) return;
   runBatchBtn.disabled = true;
   downloadZipBtn.disabled = true;
-  const recipe = state.savedRecipe;
+  // createdDate isn't part of the draft (there's nothing to "save" — see
+  // syncRecipeToHash) — it's stamped onto the recipe fresh at run time, so
+  // it always reads as the date this batch actually ran.
+  batchCtx.today = fmtDateUTC(Date.now());
+  const recipe = canonicalRecipe(state.draft);
+  recipe.createdDate = batchCtx.today;
   const results = [];
   const zipEntries = {};
   let totalBefore = 0, totalAfter = 0;
@@ -2706,36 +2980,87 @@ runBatchBtn.addEventListener('click', async () => {
   // zip" true. DOS zip timestamps can't represent years before 1980, so this is the
   // recipe's frozen date rather than the (invalid) Unix epoch.
   const zipMtime = new Date(recipe.createdDate + 'T00:00:00Z');
-  batchCtx.today = fmtDateUTC(Date.now());
   const usedNames = new Set();
 
-  for (let i = 0; i < state.files.length; i++) {
-    const entry = state.files[i];
-    progressText.textContent = `Processing ${i + 1}/${state.files.length}: ${entry.file.name}`;
-    progressBarFill.style.width = Math.round(((i) / state.files.length) * 100) + '%';
-    const srcBytes = await entry.bytesPromise;
-    const hash = await entry.hashPromise;
-    try {
-      const out = await runPipeline(entry.file, srcBytes, entry.ext, recipe, batchCtx, hash);
-      totalBefore += srcBytes.length;
-      totalAfter += out.outBytes.length;
-      const outName = uniqueName(basenameNoExt(out.outName), extOf(out.outName), usedNames);
-      results.push({
-        name: entry.file.name, outName, before: srcBytes.length, after: out.outBytes.length,
-        quality: out.deltas.encode.achieved.quality, ssim: out.deltas.encode.achieved.ssim,
-        unsatisfiable: out.unsatisfiable, error: null,
-        // Kept for on-demand Inspector use (see inspectProcessResult) —
-        // outBytes is already resident in memory via zipEntries at this
-        // point in the run, so retaining one more reference to it here
-        // costs nothing extra; format+stats are needed to redecode and to
-        // place the ROI shimmer.
-        outBytes: out.outBytes, format: recipe.encode && recipe.encode.format || 'jpeg',
-        stats: out.deltas.encode.achieved.stats,
-      });
-      zipEntries[outName] = [out.outBytes, { mtime: zipMtime }];
-    } catch (err) {
-      results.push({ name: entry.file.name, before: srcBytes.length, after: null, quality: null, ssim: null, unsatisfiable: null, error: err.message || String(err) });
+  // ── dedup: partition the whole file list into what gets processed and
+  // what's a later duplicate, before the pool starts. A skipped duplicate
+  // never enters the pool — it costs nothing — but still gets a row in the
+  // results table, right where it fell in file order, so nothing vanishes
+  // silently. ──
+  const allFiles = state.files;
+  const dedupItems = allFiles.map(f => ({ name: f.file.name, size: f.file.size }));
+  const partition = recipe.dedup ? partitionDuplicates(dedupItems, recipe.dedup.by) : { keep: dedupItems.map((_, i) => i), skip: [] };
+  const skipOfByIndex = new Map(partition.skip.map(s => [s.index, s.of]));
+  const keptIndices = partition.keep;
+
+  // ── the pool: BATCH_CONCURRENCY images in flight, each worker pulling the
+  // next KEPT file index. Per-file outcomes land in `outs` by pool index, so
+  // completion order is irrelevant to everything that follows. ──
+  const entries = keptIndices.map(i => allFiles[i]);
+  const outs = new Array(entries.length);
+  let nextIdx = 0, doneCount = 0;
+  progressText.textContent = `Processing 0/${entries.length}…`;
+  progressBarFill.style.width = '0%';
+  async function worker() {
+    for (;;) {
+      const i = nextIdx++;
+      if (i >= entries.length) return;
+      const entry = entries[i];
+      const srcBytes = await entry.bytesPromise;
+      const hash = await entry.hashPromise;
+      try {
+        const out = await runPipeline(entry, srcBytes, entry.ext, recipe, batchCtx, hash);
+        outs[i] = { entry, srcBytes, out, error: null };
+      } catch (err) {
+        outs[i] = { entry, srcBytes, out: null, error: err.message || String(err) };
+      }
+      doneCount++;
+      progressText.textContent = `Processing ${doneCount}/${entries.length} (${Math.min(BATCH_CONCURRENCY, entries.length)} at a time): ${entry.file.name}`;
+      progressBarFill.style.width = Math.round((doneCount / entries.length) * 100) + '%';
     }
+  }
+  await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, entries.length) }, worker));
+
+  // ── assignment, strictly in the ORIGINAL file order — so a skipped
+  // duplicate interleaves right where it was dropped, alongside everything
+  // else: output names (and so collision suffixes), the results table and
+  // the zip entries are the same whichever worker finished first —
+  // parallelism changes the wall clock, not the output. ──
+  const outByOriginalIndex = new Map();
+  keptIndices.forEach((origIdx, poolIdx) => outByOriginalIndex.set(origIdx, outs[poolIdx]));
+  let duplicateCount = 0;
+  for (let i = 0; i < allFiles.length; i++) {
+    const entry = allFiles[i];
+    if (skipOfByIndex.has(i)) {
+      duplicateCount++;
+      results.push({
+        id: entry.id, name: entry.file.name, outName: null, before: null, after: null,
+        quality: null, ssim: null, unsatisfiable: null, error: null,
+        duplicate: true, duplicateOfName: allFiles[skipOfByIndex.get(i)].file.name,
+      });
+      continue;
+    }
+    const { srcBytes, out, error } = outByOriginalIndex.get(i);
+    if (error != null) {
+      results.push({ id: entry.id, name: entry.file.name, before: srcBytes.length, after: null, quality: null, ssim: null, unsatisfiable: null, error });
+      continue;
+    }
+    totalBefore += srcBytes.length;
+    totalAfter += out.outBytes.length;
+    const outName = uniqueName(basenameNoExt(out.outName), extOf(out.outName), usedNames);
+    results.push({
+      id: entry.id, name: entry.file.name, outName, before: srcBytes.length, after: out.outBytes.length,
+      quality: out.deltas.encode.achieved.quality, ssim: out.deltas.encode.achieved.ssim,
+      unsatisfiable: out.unsatisfiable, error: null,
+      // Kept for on-demand Inspector use (see inspectProcessResult) —
+      // outBytes is already resident in memory via zipEntries at this
+      // point in the run, so retaining one more reference to it here
+      // costs nothing extra; format+stats are needed to redecode and to
+      // place the ROI shimmer.
+      outBytes: out.outBytes, format: recipe.encode && recipe.encode.format || 'jpeg',
+      stats: out.deltas.encode.achieved.stats,
+    });
+    zipEntries[outName] = [out.outBytes, { mtime: zipMtime }];
   }
 
   if (recipe.manifest) {
@@ -2756,13 +3081,18 @@ runBatchBtn.addEventListener('click', async () => {
   const zipBytes = fflate.zipSync(zipEntries, { level: 6 });
   state.lastZip = zipBytes;
   // Named at run time, not download time: the run is the event of record.
-  const zipTokens = { date: batchCtx.today, today: batchCtx.today, created: recipe.createdDate, count: results.length };
+  // {count} is the number of files actually processed — duplicates skipped
+  // by the Duplicates slot aren't part of this run's output.
+  const zipTokens = { date: batchCtx.today, today: batchCtx.today, created: recipe.createdDate, count: entries.length };
   state.lastZipName = (sanitizeFilename(resolveTemplate((recipe.output && recipe.output.zip) || DEFAULT_ZIP_NAME, zipTokens)) || 'imagechef') + '.zip';
   batchCtx.today = null;
   state.processResults = results;
   renderResultsTable(results);
   progressBarFill.style.width = '100%';
-  progressText.textContent = `Done: ${results.filter(r => !r.error && !r.unsatisfiable).length}/${results.length} OK`;
+  const processedResults = results.filter(r => !r.duplicate);
+  const okCount = processedResults.filter(r => !r.error && !r.unsatisfiable).length;
+  progressText.textContent = `Done: ${okCount}/${processedResults.length} OK`
+    + (duplicateCount ? ` · ${duplicateCount} duplicate${duplicateCount === 1 ? '' : 's'} skipped` : '');
   sizeTotals.textContent = `${fmtBytes(totalBefore)} → ${fmtBytes(totalAfter)}`;
   runBatchBtn.disabled = false;
   downloadZipBtn.disabled = false;
@@ -2775,7 +3105,7 @@ downloadZipBtn.addEventListener('click', () => {
   const blob = new Blob([state.lastZip], { type: 'application/zip' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = state.lastZipName || `imagechef-${state.savedRecipe.createdDate}.zip`;
+  a.download = state.lastZipName || `imagechef-${fmtDateUTC(Date.now())}.zip`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
@@ -2790,8 +3120,11 @@ downloadZipBtn.addEventListener('click', () => {
   const result = recipeFromHash(location.hash);
   if (!result) return;
   const { recipe, legacy, notes } = result;
-  if (!recipe.createdDate) recipe.createdDate = new Date().toISOString().slice(0, 10);
-  applySavedRecipe(recipe);
+  // The bookmark lands on Process, but Calibrate is where the recipe
+  // actually lives — loading it there fills every control (and, once hash
+  // sync is armed, immediately rewrites the URL into the current canonical
+  // form, which is desirable even for a legacy `#r=` link).
+  loadRecipeIntoCalibrate(recipe);
   const legacyNotice = document.getElementById('legacyRecipeNotice');
   if (legacy) {
     const intro = 'This bookmark used ImageChef’s old, pre-rework recipe format. It’s been migrated as closely as the current recipe model allows.';
@@ -2799,6 +3132,7 @@ downloadZipBtn.addEventListener('click', () => {
       ? `${escHtml(intro)}<ul style="margin:4px 0 0 18px">${notes.map(n => `<li>${escHtml(n)}</li>`).join('')}</ul>`
       : escHtml(intro);
     legacyNotice.style.display = '';
+    state.legacyNoticeShown = true;
   } else {
     legacyNotice.style.display = 'none';
   }

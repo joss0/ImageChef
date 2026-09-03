@@ -13,9 +13,9 @@ summary; those two are the source of truth.
 
 ## The model
 
-A recipe is a **record**, not a list — up to ten named, optional fields
+A recipe is a **record**, not a list — up to eleven named, optional fields
 (`orient`, `resize`, `sharpen`, `stamp`, `flatten`, `color`, `metadata`,
-`encode`, `output`, `manifest`). There is no operation list, no drag-to-reorder, no
+`encode`, `output`, `dedup`, `manifest`). There is no operation list, no drag-to-reorder, no
 per-op enable toggle. The engine runs one fixed pipeline:
 
 ```
@@ -30,20 +30,26 @@ over whatever order the fields happen to be in.
 
 - **Audit** — reads every loaded file's dimensions, format, color-profile
   signal, and metadata inventory (flagging GPS/PII). No pixels are modified.
-- **Calibrate** — pick one exemplar image, tune every slot with full
+- **Calibrate** — pick one exemplar image and tune every slot with full
   instruments (worst-region loupe, metadata diff table, before/after resize
-  thumbnail), and produce the recipe. The encode slot's "quality" control
-  is a calibration instrument only — what gets saved is the **achieved SSIM**
-  against the pre-encode raster, not the quality number.
-- **Process** — runs the saved recipe over the whole batch. Each image
+  thumbnail). What Calibrate shows *is* the recipe; it is mirrored into the
+  page URL as you edit, so there is no save step. The encode slot's
+  "quality" control is a calibration instrument only — what the recipe
+  carries is the **achieved SSIM** against the pre-encode raster, not the
+  quality number. A fresh page starts from the **email preset** (fit inside
+  2048 px, JPEG under 100 KB, white background, exact duplicates skipped).
+- **Process** — runs the current recipe over the whole batch. Each image
   binary-searches encoder quality to hit the calibrated SSIM target subject
   to an optional byte cap; a conflict between the two is reported by name,
   not silently resolved, and the run continues for the rest of the batch.
+  Images are processed three at a time; output names, collision suffixes,
+  the results table and the ZIP entries are assigned in file order once
+  the pool drains, so parallelism changes the wall clock, never the output.
   Output is a ZIP (optionally with a `manifest.json` built by the same report
-  generator Audit uses). Saving a recipe writes it into the page URL, so the
-  saved state is a bookmark: open it and you land straight on Process with
-  the recipe already loaded — drop images, Run Batch, review, download,
-  with no need to revisit Audit or Calibrate.
+  generator Audit uses). Because the recipe lives in the URL, a bookmark or
+  copied link is a saved recipe: open it and you land straight on Process
+  with every Calibrate control already set — drop images, Run Batch, review,
+  download, or step back into Calibrate to adjust.
 
 ## Notable behavior
 
@@ -54,6 +60,9 @@ over whatever order the fields happen to be in.
   user-assembled compose-your-own scale+crop. Resampling happens in linear
   light on premultiplied alpha, so a transparent neighbor never drags an
   opaque edge toward black.
+  `fit` never enlarges a smaller source unless the slot says `upscale: true`
+  (an explicit checkbox), so the 2048 px email default leaves small photos
+  at their native size.
 - **Metadata** defaults to strip-all, including the color-space tag the
   browser's own encoder embeds regardless of what was asked for. Retaining
   copyright/artist/description/capture-date is opt-in and by name; GPS is
@@ -63,7 +72,8 @@ over whatever order the fields happen to be in.
   a ZIP-name template (default `imagechef-{today}`). Both share the stamp's
   token vocabulary: `{name}`, `{seq}` / `{seq:3}` (zero-padded batch
   position), `{date}`, `{today}`, `{hash:8}`, `{width}x{height}`; the ZIP
-  name also takes `{created}` and `{count}`. Illegal filename characters
+  name also takes `{count}` (files processed; `{created}` is kept as an
+  alias for `{today}`). Illegal filename characters
   are stripped from the resolved name, and two images that resolve to the
   same name get `-2`, `-3` rather than overwriting each other. Calibrate
   shows the exemplar's resolved name live.
@@ -71,9 +81,13 @@ over whatever order the fields happen to be in.
   produce byte-identical image entries under identical names on repeat
   runs. Dates are data, not noise: `{date}` is the image's own EXIF capture
   date (else its file date) and `{today}` is the run date, so a copyright
-  stamp or an archive name gets a real date rather than the day the recipe
-  happened to be saved. `{hash:N}` is read from file content. Nothing else
-  reads the clock.
+  stamp or an archive name gets a real date. `{hash:N}` is read from file
+  content. Nothing else reads the clock.
+- **Remove Duplicates** is the `dedup` slot: match later files to earlier
+  ones by name+size (default) or by name only. Nothing is dropped at
+  import — every file is listed, duplicates are badged in the file list
+  as the setting changes, skipped at Process time, shown as "Duplicate of
+  …" in the results, and never given a `{seq}` number.
 - **Image Inspector**: a zoom/pan viewer for eyeballing full images, not just
   the worst-region loupe's crop — click a file's thumbnail at import time, or
   "View original vs final" during Calibrate, or "Inspect" on a Process
@@ -109,8 +123,9 @@ JPEG, PNG, WebP, BMP, GIF (first frame), and ZIP archives of the above.
 
 1. Open `index.html` in any modern browser — no install, no build step.
 2. Drop images, a folder, or a ZIP archive onto the drop zone.
-3. **Audit** the set, or go straight to **Calibrate**: pick an exemplar,
-   tune the slots you need, click **Save Recipe**.
+3. **Audit** the set, or go straight to **Calibrate**: pick an exemplar and
+   tune the slots you need — the URL follows along, so bookmark it if you
+   want the recipe back later.
 4. In **Process**, click **Run Batch**, then **Download ZIP**.
 
 ## Architecture

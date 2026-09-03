@@ -21,7 +21,17 @@ Do two recipes with the same fields in different order differ?
 
 What are the slots?
 > `orient`, `resize`, `sharpen`, `stamp`, `flatten`, `color`, `metadata`,
-> `encode`, `output`, `manifest`.
+> `encode`, `output`, `dedup`, `manifest`. The last three act on the set,
+> not on pixels.
+
+Where is the recipe saved?
+> In the URL fragment, continuously, as Calibrate changes it. There is no
+> save button. A bookmark is a saved recipe.
+
+What does a fresh page start with?
+> The email preset: fit inside 2048 px, JPEG under 100 KB, white
+> background, exact duplicates skipped. A sensible demonstration, not a
+> requirement — every slot stays optional.
 
 Does the user choose the execution order?
 > Never. The engine runs one fixed pipeline:
@@ -54,8 +64,14 @@ What happens to the source file's EXIF orientation tag?
 ## Chapter 3: Resize
 
 What are the resize intents?
-> `fit` (inside a box, aspect preserved), `cover` (fill a box, aspect preserved,
+> `fit` (inside a box, aspect preserved; never enlarges a smaller source unless
+> the slot says `upscale: true`), `cover` (fill a box, aspect preserved,
 > center-trimmed), `exact-pad` (exact dimensions, padded with the flatten color).
+
+Does `fit` enlarge a small photo to reach the box?
+> Not unless asked. Enlargement invents pixels; it is an explicit, visible
+> choice, never a silent default. `cover` and `exact-pad` promise a size and
+> scale to deliver it.
 
 May the user compose scale-then-trim manually?
 > No. Composition is ordering-reasoning in disguise. Name the intent instead.
@@ -93,6 +109,12 @@ Is `{seq}` deterministic?
 
 Is the stamp a watermark, a serial number, or a DRAFT mark?
 > Yes. One mechanism. Do not build three.
+
+What does the `dedup` slot hold?
+> A match rule: `name+size` or `name`. The first file under a key is
+> processed; every later one is skipped, shown as "Duplicate of …" in the
+> results, and never numbered. Skipping is a function of the file list and
+> the rule — nobody looked at a picture.
 
 What does the `output` slot hold?
 > A file-name template and a zip-name template. The encode format supplies
@@ -155,7 +177,12 @@ Where is the only honest thumbnail?
 
 What are the modes?
 > Audit (read the set, touch nothing), Calibrate (one exemplar, full
-> instruments, produces the recipe), Process (the batch run, zip out).
+> instruments; the recipe is what it shows), Process (the batch run, zip out).
+
+How many images does Process keep in flight?
+> Three. Outcomes are stored by file index and names, results and zip
+> entries are assigned in file order after the pool drains, so concurrency
+> changes the wall clock and nothing else.
 
 Do Audit and the manifest share code?
 > They must. One report generator, two exits: instead-of-processing, or
@@ -184,8 +211,9 @@ Do Audit and the manifest share code?
 8. **Unsatisfiable is a report, not a crash.** Constraint failures are named,
    per image, in the summary.
 9. **Show deltas in their native domain.** No step thumbnails except resize.
-10. **When a feature needs a human to look at one specific image, refuse it.**
-    That is the boundary of the tool.
+10. **When a feature needs a human to decide something about one specific
+    image, refuse it.** Looking is fine — the Inspector exists. Deciding per
+    image is the boundary of the tool.
 
 ## Acceptance tests
 
@@ -208,6 +236,14 @@ Do Audit and the manifest share code?
 - Rotating 90° four times in the UI stores the identity orientation.
 - The output JPEG of a `metadata: retain [copyright]` recipe contains the
   copyright field and nothing else when inspected with an EXIF reader.
+- Changing any Calibrate control updates the URL; opening that URL in a fresh
+  tab restores every control to the same state. A plain load leaves the URL
+  clean.
+- Two files with the same name and size, `dedup` on, yield one processed
+  entry and one "Duplicate of …" row; with `dedup` off, both are processed
+  and numbered.
+- Eight images added in any order, processed three at a time, produce the
+  same entry names and bytes as the same eight processed one at a time.
 
 Are we done?
 > When the tests pass and the file is still one file, yes.
