@@ -21,6 +21,7 @@ const lib = new Function(block[1] + `
   return {
     canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
     resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
+    partitionDuplicates,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
     computeBlockStats, normalizeBlockLoss,
@@ -32,6 +33,7 @@ const lib = new Function(block[1] + `
 const {
   canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
   resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
+  partitionDuplicates,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
   computeBlockStats, normalizeBlockLoss,
@@ -264,6 +266,77 @@ test('the output slot is part of the record: canonical, ordered after encode, ro
   assert.deepEqual(Object.keys(canonicalRecipe(r)), ['encode', 'output', 'manifest']);
   assert.deepEqual(recipeFromHash(recipeToHash(r)).recipe.output, r.output);
   assert.equal(DEFAULT_ZIP_NAME, 'imagechef-{today}');
+});
+
+// ── Dedup: partition a file list into what gets processed and what's a
+// later duplicate ─────────────────────────────────────────────────────────
+test('the dedup slot is part of the record: canonical, ordered between output and manifest, round-trips through the hash', () => {
+  assert.ok(SLOT_KEYS.includes('dedup'));
+  assert.ok(SLOT_KEYS.indexOf('dedup') > SLOT_KEYS.indexOf('output'));
+  assert.ok(SLOT_KEYS.indexOf('dedup') < SLOT_KEYS.indexOf('manifest'));
+  const r = { manifest: true, dedup: { by: 'name' }, output: { name: '{name}' }, encode: { format: 'jpeg' } };
+  assert.deepEqual(Object.keys(canonicalRecipe(r)), ['encode', 'output', 'dedup', 'manifest']);
+  assert.deepEqual(recipeFromHash(recipeToHash(r)).recipe.dedup, { by: 'name' });
+});
+
+test('partitionDuplicates: name+size keeps the first occurrence, skips later exact repeats', () => {
+  const items = [
+    { name: 'a.jpg', size: 100 },
+    { name: 'a.jpg', size: 100 }, // exact repeat of 0
+    { name: 'b.jpg', size: 200 },
+    { name: 'a.jpg', size: 999 }, // same name, different size — not a duplicate under name+size
+  ];
+  const { keep, skip } = partitionDuplicates(items, 'name+size');
+  assert.deepEqual(keep, [0, 2, 3]);
+  assert.deepEqual(skip, [{ index: 1, of: 0 }]);
+});
+
+test('partitionDuplicates: name-only mode treats same-name files as duplicates regardless of size', () => {
+  const items = [
+    { name: 'a.jpg', size: 100 },
+    { name: 'a.jpg', size: 999 }, // same name, different size — a duplicate under name-only
+    { name: 'b.jpg', size: 200 },
+  ];
+  const { keep, skip } = partitionDuplicates(items, 'name');
+  assert.deepEqual(keep, [0, 2]);
+  assert.deepEqual(skip, [{ index: 1, of: 0 }]);
+});
+
+test('partitionDuplicates: no duplicates keeps everything, in order', () => {
+  const items = [{ name: 'a.jpg', size: 1 }, { name: 'b.jpg', size: 2 }, { name: 'c.jpg', size: 3 }];
+  const { keep, skip } = partitionDuplicates(items, 'name+size');
+  assert.deepEqual(keep, [0, 1, 2]);
+  assert.deepEqual(skip, []);
+});
+
+test('partitionDuplicates: all duplicates keeps only the first, skips the rest pointing back at it', () => {
+  const items = [{ name: 'a.jpg', size: 5 }, { name: 'a.jpg', size: 5 }, { name: 'a.jpg', size: 5 }];
+  const { keep, skip } = partitionDuplicates(items, 'name+size');
+  assert.deepEqual(keep, [0]);
+  assert.deepEqual(skip, [{ index: 1, of: 0 }, { index: 2, of: 0 }]);
+});
+
+test('partitionDuplicates: an unrecognized "by" value falls back to name+size, the stricter mode', () => {
+  const items = [{ name: 'a.jpg', size: 1 }, { name: 'a.jpg', size: 1 }, { name: 'a.jpg', size: 2 }];
+  const withUndefined = partitionDuplicates(items, undefined);
+  const withGarbage = partitionDuplicates(items, 'bogus-mode');
+  const expected = partitionDuplicates(items, 'name+size');
+  assert.deepEqual(withUndefined, expected);
+  assert.deepEqual(withGarbage, expected);
+  assert.deepEqual(expected.keep, [0, 2]);
+  assert.deepEqual(expected.skip, [{ index: 1, of: 0 }]);
+});
+
+test('migrateLegacyRecipe: the old dedup op carries its "by" setting straight across', () => {
+  const byNameSize = migrateLegacyRecipe([legacyStep('dedup', { by: 'name+size' })]);
+  assert.deepEqual(byNameSize.recipe.dedup, { by: 'name+size' });
+  assert.deepEqual(byNameSize.notes, []);
+  const byName = migrateLegacyRecipe([legacyStep('dedup', { by: 'name' })]);
+  assert.deepEqual(byName.recipe.dedup, { by: 'name' });
+  assert.deepEqual(byName.notes, []);
+  // An unrecognized `by` still migrates, falling back to the stricter mode.
+  const byBogus = migrateLegacyRecipe([legacyStep('dedup', { by: 'bogus' })]);
+  assert.deepEqual(byBogus.recipe.dedup, { by: 'name+size' });
 });
 
 // ── Orientation: closed group of 8 ────────────────────────────────────────
