@@ -13,9 +13,9 @@ summary; those two are the source of truth.
 
 ## The model
 
-A recipe is a **record**, not a list — up to nine named, optional fields
+A recipe is a **record**, not a list — up to ten named, optional fields
 (`orient`, `resize`, `sharpen`, `stamp`, `flatten`, `color`, `metadata`,
-`encode`, `manifest`). There is no operation list, no drag-to-reorder, no
+`encode`, `output`, `manifest`). There is no operation list, no drag-to-reorder, no
 per-op enable toggle. The engine runs one fixed pipeline:
 
 ```
@@ -58,9 +58,22 @@ over whatever order the fields happen to be in.
   browser's own encoder embeds regardless of what was asked for. Retaining
   copyright/artist/description/capture-date is opt-in and by name; GPS is
   never retainable through this mechanism, even opt-in.
-- **Determinism**: the same input set and recipe produce a byte-identical
-  ZIP on repeat runs — `{date}` and `{hash:8}` stamp tokens are frozen at
-  Save Recipe / read from file content, never wall-clock at Process time.
+- **Output names are templated.** The `output` slot holds a file-name
+  template (default `{name}`; the encode format supplies the extension) and
+  a ZIP-name template (default `imagechef-{today}`). Both share the stamp's
+  token vocabulary: `{name}`, `{seq}` / `{seq:3}` (zero-padded batch
+  position), `{date}`, `{today}`, `{hash:8}`, `{width}x{height}`; the ZIP
+  name also takes `{created}` and `{count}`. Illegal filename characters
+  are stripped from the resolved name, and two images that resolve to the
+  same name get `-2`, `-3` rather than overwriting each other. Calibrate
+  shows the exemplar's resolved name live.
+- **Determinism, with dates of record**: the same input set and recipe
+  produce byte-identical image entries under identical names on repeat
+  runs. Dates are data, not noise: `{date}` is the image's own EXIF capture
+  date (else its file date) and `{today}` is the run date, so a copyright
+  stamp or an archive name gets a real date rather than the day the recipe
+  happened to be saved. `{hash:N}` is read from file content. Nothing else
+  reads the clock.
 - **Image Inspector**: a zoom/pan viewer for eyeballing full images, not just
   the worst-region loupe's crop — click a file's thumbnail at import time, or
   "View original vs final" during Calibrate, or "Inspect" on a Process
@@ -78,11 +91,14 @@ over whatever order the fields happen to be in.
   the "Tune on" dropdown — no need to hunt for it by name in a list.
 - **Old recipe bookmarks still work.** A link saved under the pre-rework,
   CyberChef-style ordered op list (see `imagechef-outline.md`) is detected
-  and migrated: rotate/flip, a fixed-size or longest-edge resize, a
-  per-image byte cap, and jpeg/png/webp format all carry over exactly. What
-  has no equivalent in the fixed pipeline — a percent resize (relative to
-  each image, not a fixed box), a total-batch byte budget, "keep original"
-  format, custom output filenames, grayscale — is named in an on-screen
+  and migrated (both the old `#r=` and the current `#recipe=` hash keys, and
+  both the bare-array and the wrapped payload the old build wrote):
+  rotate/flip, a fixed-size or longest-edge resize, a per-image byte cap,
+  jpeg/png/webp format, the rename pattern (into `output.name`, with
+  `{index}` becoming `{seq:3}`) and the ZIP name (into `output.zip`) all
+  carry over. What has no equivalent in the fixed pipeline — a percent
+  resize (relative to each image, not a fixed box), a total-batch byte
+  budget, "keep original" format, grayscale — is named in an on-screen
   notice rather than silently dropped or guessed at.
 
 ## Supported input formats

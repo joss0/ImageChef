@@ -21,7 +21,7 @@ Do two recipes with the same fields in different order differ?
 
 What are the slots?
 > `orient`, `resize`, `sharpen`, `stamp`, `flatten`, `color`, `metadata`,
-> `encode`, `manifest`.
+> `encode`, `output`, `manifest`.
 
 Does the user choose the execution order?
 > Never. The engine runs one fixed pipeline:
@@ -69,11 +69,23 @@ Where does sharpen go?
 
 ---
 
-## Chapter 4: The Stamp
+## Chapter 4: The Stamp and the Name
 
 What is a stamp?
-> A template string rendered at a fixed position in output space:
-> `{date}`, `{seq}`, `{name}`, `{hash:8}`.
+> A template string rendered at a fixed position in output space.
+
+What tokens exist?
+> `{name}`, `{seq}` / `{seq:N}`, `{date}`, `{today}`, `{hash:N}`, `{width}`,
+> `{height}`. One vocabulary for the stamp and the output name. Do not build two.
+
+What is `{date}`?
+> The image's date of record: its EXIF capture date, else its file's
+> modification date. Never the recipe's save date — a copyright line wants the
+> year the picture was taken.
+
+What is `{today}`?
+> The day the batch was run. A recipe that uses it is deterministic per day,
+> and declares as much by using the token.
 
 Is `{seq}` deterministic?
 > Yes: it is the image's index in the sorted (by filename) input set.
@@ -81,6 +93,20 @@ Is `{seq}` deterministic?
 
 Is the stamp a watermark, a serial number, or a DRAFT mark?
 > Yes. One mechanism. Do not build three.
+
+What does the `output` slot hold?
+> A file-name template and a zip-name template. The encode format supplies
+> the extension; the template never does. Illegal filename characters are
+> stripped from the resolved name, not from the template, so `{seq:3}` keeps
+> its colon.
+
+Two images resolve to the same name. What happens?
+> The later one, in batch order, gets `-2`, then `-3`. A collision is a
+> suffix, never an overwrite and never a question.
+
+May the user name each image from a pasted table?
+> No. That is the CSV-in non-feature. A name is a function of
+> `(image, recipe, batch position, dates of record)`, same as the pixels.
 
 ---
 
@@ -148,8 +174,13 @@ Do Audit and the manifest share code?
    Verify with the network tab open.
 5. **Resample in linear light with premultiplied alpha.**
 6. **Default strip-all metadata.** Retention is opt-in, by named field.
-7. **Determinism is the product.** Same inputs + same recipe = byte-identical
-   zip contents (excluding zip timestamps). This is a test, not an aspiration.
+7. **Determinism is the product; dates of record are data.** Same inputs +
+   same recipe = the same pixels, the same bytes, the same names. A date of
+   record — the image's own capture date, or the day the batch was run — is
+   an input the user asked for by name (`{date}`, `{today}`), not noise: it
+   may appear in a stamp, a filename, or the manifest, and nowhere else.
+   Never read the clock for anything a token did not request. This is a
+   test, not an aspiration.
 8. **Unsatisfiable is a report, not a crash.** Constraint failures are named,
    per image, in the summary.
 9. **Show deltas in their native domain.** No step thumbnails except resize.
@@ -168,7 +199,12 @@ Do Audit and the manifest share code?
   results summary with the conflict stated; the run completes for the others.
 - Audit mode on a set containing GPS EXIF flags the exposure without modifying
   any file.
-- Running the same input set twice produces byte-identical image entries.
+- Running the same input set twice produces byte-identical image entries under
+  identical names; a recipe using `{today}` differs only in that token, and
+  only across days.
+- An `output.name` of `{date}_{seq:3}` over two images captured on the same day
+  yields `…_001` and `…_002`; two that resolve identically yield `x` and `x-2`,
+  never one file.
 - Rotating 90° four times in the UI stores the identity orientation.
 - The output JPEG of a `metadata: retain [copyright]` recipe contains the
   copyright field and nothing else when inspected with an EXIF reader.

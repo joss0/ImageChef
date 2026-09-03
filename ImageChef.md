@@ -8,8 +8,10 @@ forever, and it does the same thing every time.
 
 - Not an editor. No human looks at individual images during a batch run.
 - Not per-image. Every operation is a deterministic function of
-  `(image, recipe, batch position)`. If a feature requires a human to look at a
-  specific image and decide something, it does not belong here.
+  `(image, recipe, batch position, dates of record)`. If a feature requires a
+  human to look at a specific image and decide something, it does not belong
+  here. A date of record — the image's own capture date, the day the batch was
+  run — is data the user asks for by name, not a per-image decision.
 - Not ordered. There is no operation list to arrange. There is no drag-to-reorder.
 
 These exclusions are load-bearing. They are what makes the output trustable.
@@ -36,7 +38,17 @@ decode → orient → resize → sharpen → stamp → flatten → color → met
 ```
 
 Exactly one decode. Exactly one encode, at the end. Generational loss is impossible
-by construction, not by user discipline.
+by construction, not by user discipline. `output` sits outside the pixel pipeline:
+it names the encoded result, and `manifest` describes it.
+
+### Dates of record
+
+`{date}` is the image's own date: its EXIF capture date, else the file's
+modification date. `{today}` is the day the batch was run. Neither is the day the
+recipe was saved — a copyright line wants the year the picture was taken, and an
+archive wants the day it was made. A recipe that uses `{today}` is deterministic
+per day, and says so by using the token. Nothing else in the engine reads the
+clock.
 
 ### Why no user ordering is needed
 
@@ -60,11 +72,12 @@ Every apparent ordering problem collapses into one of three shapes:
 | `orient` | one of 8 D4 states | UI: successive rotate/flip taps compose into the state |
 | `resize` | `{ intent, dimensions }` | Intents: `fit`, `cover`, `exact-pad`. Named intents, not user-assembled compositions. Resample in linear light with premultiplied alpha. |
 | `sharpen` | amount | Applied immediately after resample. |
-| `stamp` | template + position + style | Variables: `{date}`, `{seq}`, `{name}`, `{hash:8}`. One mechanism covers serial-numbering, copyright lines, and DRAFT marks. |
+| `stamp` | template + position + style | Tokens (shared with `output`): `{name}`, `{seq}` / `{seq:N}`, `{date}`, `{today}`, `{hash:N}`, `{width}`, `{height}`. One mechanism covers serial-numbering, copyright lines, and DRAFT marks. |
 | `flatten` | background color | Alpha handling is explicit, not incidental. |
 | `color` | target profile (sRGB) | Convert, then tag or strip the profile per `metadata`. |
 | `metadata` | retain-list | Default strip-all; the user names what survives (e.g. copyright). |
 | `encode` | `{ format, constraints }` | Constraints below. |
+| `output` | file-name template + zip-name template | Same tokens as `stamp`, resolved per image; the encode format supplies the extension. Defaults `{name}` and `imagechef-{today}`. Not a pixel operation — it names the encoded result. |
 | `manifest` | boolean | Emit `manifest.json` in the zip: filenames, dimensions, bytes, hashes, the recipe itself, date. Provenance for free. |
 
 ## Encoding is constraint satisfaction, not a quality slider

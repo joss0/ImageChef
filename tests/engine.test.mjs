@@ -20,6 +20,7 @@ assert.ok(block, 'ENGINE-LIB block not found in index.html');
 const lib = new Function(block[1] + `
   return {
     canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
+    resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
     ORIENT_STATES, ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
     resampleAxis, resampleLinearPremultiplied,
     computeBlockStats, normalizeBlockLoss,
@@ -29,7 +30,8 @@ const lib = new Function(block[1] + `
 `)();
 
 const {
-  canonicalRecipe, recipeIdentity, recipeToHash, recipeFromHash, migrateLegacyRecipe,
+  canonicalRecipe, recipeIdentity, SLOT_KEYS, recipeToHash, recipeFromHash, migrateLegacyRecipe,
+  resolveTemplate, sanitizeFilename, resolveOutputBasename, uniqueName, DEFAULT_OUTPUT_NAME, DEFAULT_ZIP_NAME,
   ORIENT_TAP, ORIENT_IDENTITY, composeOrientStates,
   resampleLinearPremultiplied,
   computeBlockStats, normalizeBlockLoss,
@@ -106,9 +108,16 @@ test('migrateLegacyRecipe maps the old default recipe onto today\'s slots', () =
   assert.equal(recipe.encode.maxBytes, 500 * 1024);
   assert.equal(recipe.encode.format, 'jpeg');
   assert.equal(recipe.orient, undefined); // no rotate step present
-  // Only the genuinely unmappable step (rename) produces a note.
-  assert.equal(notes.length, 1);
-  assert.match(notes[0], /Rename/);
+  // The rename pattern lives on as the output slot's name template, so the
+  // old default recipe migrates with nothing to report.
+  assert.deepEqual(recipe.output, { name: '{name}' });
+  assert.deepEqual(notes, []);
+});
+
+test('migrateLegacyRecipe: rename tokens map onto today\'s — {index} was 3-digit padded, so it becomes {seq:3}', () => {
+  const { recipe, notes } = migrateLegacyRecipe([legacyStep('rename', { pattern: '{date}_{name}_{index}_{width}x{height}' })]);
+  assert.equal(recipe.output.name, '{date}_{name}_{seq:3}_{width}x{height}');
+  assert.deepEqual(notes, []);
 });
 
 test('migrateLegacyRecipe: old "exact" resize mode did the same aspect-fit math as "fit"', () => {
@@ -168,8 +177,93 @@ test('recipeFromHash detects a legacy (array-shaped) hash and migrates it, repor
   const hash = '#recipe=' + btoa(binary);
   const result = recipeFromHash(hash);
   assert.equal(result.legacy, true);
-  assert.equal(result.notes.length, 1);
-  assert.match(result.notes[0], /Rename/);
+  assert.deepEqual(result.notes, []);
+  assert.equal(result.recipe.output.name, '{name}-{seq:3}');
+});
+
+test('recipeFromHash accepts the old "#r=" key and the object-shaped payload the last pre-rework build wrote', () => {
+  // saveRecipeToHash() in the old app: { recipe: steps, zip, rename?, frozen? }
+  const payload = {
+    recipe: [legacyStep('format', { output: 'png' }), legacyStep('rename', { pattern: '{name}' })],
+    zip: 'batch_{date}.zip',
+    rename: '{index}-{name}',   // top-level pattern took precedence over the step's own
+    frozen: '2025-03-09',
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  const result = recipeFromHash('#r=' + btoa(binary));
+  assert.ok(result, 'old #r= bookmark must be recognized');
+  assert.equal(result.legacy, true);
+  assert.equal(result.recipe.encode.format, 'png');
+  // old zip {date} was download-day → {today}; ".zip" is implied, not stored
+  assert.deepEqual(result.recipe.output, { name: '{seq:3}-{name}', zip: 'batch_{today}' });
+  assert.equal(result.recipe.createdDate, '2025-03-09');
+  assert.deepEqual(result.notes, []);
+});
+
+test('recipeFromHash: a bare legacy array under the old "#r=" key still migrates', () => {
+  const bytes = new TextEncoder().encode(JSON.stringify([legacyStep('format', { output: 'webp' })]));
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  const result = recipeFromHash('#r=' + btoa(binary));
+  assert.equal(result.legacy, true);
+  assert.equal(result.recipe.encode.format, 'webp');
+});
+
+// ── Templates: one vocabulary for the stamp and the output name ──────────
+const TOKENS = { name: 'IMG_0042', seq: 7, hash: 'deadbeefcafe0123', date: '2024-05-01', today: '2026-09-02', width: 1920, height: 1080 };
+
+test('resolveTemplate resolves every token, with {seq:N} padding and {hash:N} prefixes', () => {
+  assert.equal(resolveTemplate('{date}_{name}_{seq}', TOKENS), '2024-05-01_IMG_0042_7');
+  assert.equal(resolveTemplate('{seq:3}', TOKENS), '007');
+  assert.equal(resolveTemplate('{hash:8}', TOKENS), 'deadbeef');
+  assert.equal(resolveTemplate('{hash}', TOKENS), 'deadbeefcafe0123');
+  assert.equal(resolveTemplate('{width}x{height}', TOKENS), '1920x1080');
+  assert.equal(resolveTemplate('run {today}', TOKENS), 'run 2026-09-02');
+  assert.equal(resolveTemplate('© {name} {date}', TOKENS), '© IMG_0042 2024-05-01');
+});
+
+test('resolveTemplate leaves a token it was not given as written, and renders a null one empty', () => {
+  assert.equal(resolveTemplate('{name}-{client}', TOKENS), 'IMG_0042-{client}');
+  assert.equal(resolveTemplate('{name:3}', TOKENS), '{name:3}');
+  assert.equal(resolveTemplate('[{date}]', { ...TOKENS, date: null }), '[]');
+  assert.equal(resolveTemplate(null, TOKENS), '');
+});
+
+test('sanitizeFilename strips characters illegal on any desktop OS and trailing dots/spaces', () => {
+  assert.equal(sanitizeFilename('a<b>c:d"e/f\\g|h?i*j'), 'abcdefghij');
+  assert.equal(sanitizeFilename('  name. . '), 'name');
+  assert.equal(sanitizeFilename('ünïcödé ok'), 'ünïcödé ok');
+  assert.equal(sanitizeFilename(null), '');
+});
+
+test('resolveOutputBasename sanitizes the resolved name, not the template, and never yields an empty name', () => {
+  assert.equal(resolveOutputBasename('{date}_{seq:3}', TOKENS), '2024-05-01_007');   // colon in {seq:3} survives
+  assert.equal(resolveOutputBasename('{name}/{seq}', TOKENS), 'IMG_00427');          // slash in the *result* does not
+  assert.equal(resolveOutputBasename('???', TOKENS), 'IMG_0042');                    // all-illegal → source name
+  assert.equal(resolveOutputBasename('', TOKENS), 'IMG_0042');                       // empty → default {name}
+  assert.equal(resolveOutputBasename(undefined, TOKENS), resolveOutputBasename(DEFAULT_OUTPUT_NAME, TOKENS));
+  assert.equal(resolveOutputBasename('{seq}', { ...TOKENS, name: '***', seq: null }), 'image');
+});
+
+test('uniqueName suffixes a collision in batch order instead of overwriting', () => {
+  const used = new Set();
+  assert.equal(uniqueName('2024-05-01', 'jpg', used), '2024-05-01.jpg');
+  assert.equal(uniqueName('2024-05-01', 'jpg', used), '2024-05-01-2.jpg');
+  assert.equal(uniqueName('2024-05-01', 'jpg', used), '2024-05-01-3.jpg');
+  assert.equal(uniqueName('2024-05-01', 'png', used), '2024-05-01.png'); // different extension, no collision
+  assert.equal(used.size, 4);
+});
+
+test('the output slot is part of the record: canonical, ordered after encode, round-trips through the hash', () => {
+  assert.ok(SLOT_KEYS.includes('output'));
+  assert.ok(SLOT_KEYS.indexOf('output') > SLOT_KEYS.indexOf('encode'));
+  assert.ok(SLOT_KEYS.indexOf('output') < SLOT_KEYS.indexOf('manifest'));
+  const r = { manifest: true, output: { name: '{date}_{seq:3}', zip: 'set-{today}' }, encode: { format: 'jpeg' } };
+  assert.deepEqual(Object.keys(canonicalRecipe(r)), ['encode', 'output', 'manifest']);
+  assert.deepEqual(recipeFromHash(recipeToHash(r)).recipe.output, r.output);
+  assert.equal(DEFAULT_ZIP_NAME, 'imagechef-{today}');
 });
 
 // ── Orientation: closed group of 8 ────────────────────────────────────────
